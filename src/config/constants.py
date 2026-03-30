@@ -1,0 +1,30 @@
+"""Project-wide constants and defaults."""
+
+# Time intervals (seconds)
+SECONDS_1_MIN = 60
+SECONDS_5_MIN = 5 * 60
+SECONDS_15_MIN = 15 * 60
+SECONDS_30_MIN = 30 * 60
+SECONDS_1_HOUR = 60 * 60
+SECONDS_6_HOURS = 6 * 60 * 60
+SECONDS_24_HOURS = 24 * 60 * 60
+
+# Candle/history windows
+HOURS_IN_7_DAYS = 7 * 24
+KLINES_15M_7D = 7 * 24 * 4  # 672
+RSI_PERIOD = 14
+
+# Signal thresholds
+RSI_OVERSOLD = 28.0
+RSI_OVERBOUGHT = 72.0
+VOLUME_SPIKE_MULTIPLIER = 2.0
+
+# Alert and message values
+DEFAULT_EMERGENCY_MOVE_PCT = 8.0
+DEFAULT_CRITICAL_ALERTS_PER_DAY = 3
+DEFAULT_SUGGESTED_SIZE_TEXT = "$50–$100 max this trade (1–2% of $5,000)."
+
+# AI limits
+AI_DAILY_CALL_LIMIT = 100
+AI_MAX_INPUT_CHARS = 500
+AI_MAX_TOKENS = 800

@@ -1,0 +1,32 @@
+# Secrets — never commit
+.env
+
+# Runtime data — regenerated on start
+bot.log
+bot.pid
+memory.json
+portfolio.json
+alert_history.json
+optimizer_report.json
+
+# Python
+__pycache__/
+.pycache/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# macOS
+.DS_Store
+.AppleDouble
+
+# IDE
+.idea/
+.vscode/
+*.swp

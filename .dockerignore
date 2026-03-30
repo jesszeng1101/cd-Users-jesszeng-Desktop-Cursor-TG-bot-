@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+.pycache/
+*.pyc
+*.pyo
+.env
+.DS_Store
+bot.log
+bot.pid
+memory.json
+portfolio.json
+alert_history.json
+optimizer_report.json
+*.log
+*.pid
