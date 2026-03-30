@@ -598,7 +598,8 @@ async def fetch_bybit_klines(symbol: str, interval: str, limit: int = 200) -> li
 async def prime_crypto_15m_volume_avgs(state: BotState, client: httpx.AsyncClient) -> None:
     # Uses 7 days of 15m candles to compute average volume baseline.
     # 7 days * 24h * 4 candles/hour = ~672
-    for pair in CRYPTO_PAIRS:
+    # Volume baseline for websocket monitor uses Binance-only pairs.
+    for pair in BINANCE_WS_PAIRS:
         try:
             klines = await fetch_klines_15m(client, pair, limit=KLINES_15M_7D)
             volumes = []

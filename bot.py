@@ -778,6 +778,7 @@ CRYPTO_TRACKED = {
     "MNTUSDT": "MNT",
 }
 CRYPTO_KEYS_BY_INPUT = {**{v: k for k, v in CRYPTO_TRACKED.items()}, **{k: k for k in CRYPTO_TRACKED.keys()}}
+BYBIT_ONLY_SYMBOLS = {"MNTUSDT"}
 
 STOCK_KEYS_BY_INPUT = {
     "SPY": "SPY",
@@ -1144,6 +1145,27 @@ async def fetch_live_bybit_24h(symbols: list[str]) -> dict[str, dict[str, float]
     return out
 
 
+async def fetch_live_crypto_24h(httpx_client: httpx.AsyncClient, symbols: list[str]) -> dict[str, dict[str, float]]:
+    """
+    Unified crypto ticker fetch:
+    - MNTUSDT always via Bybit (never Binance)
+    - others via Binance first, Bybit fallback
+    """
+    unique = list(dict.fromkeys([s.upper() for s in symbols]))
+    bybit_syms = [s for s in unique if s in BYBIT_ONLY_SYMBOLS]
+    binance_syms = [s for s in unique if s not in BYBIT_ONLY_SYMBOLS]
+
+    out: dict[str, dict[str, float]] = {}
+    if binance_syms:
+        out.update(await fetch_live_binance_24h(httpx_client, binance_syms))
+        missing_binance = [s for s in binance_syms if s not in out]
+        if missing_binance:
+            out.update(await fetch_live_bybit_24h(missing_binance))
+    if bybit_syms:
+        out.update(await fetch_live_bybit_24h(bybit_syms))
+    return out
+
+
 def _yf_last_and_pct_sync(ticker: str) -> tuple[Optional[float], Optional[float], bool]:
     t = yf.Ticker(ticker)
 
@@ -1213,12 +1235,8 @@ async def fetch_live_market_data(application: Application, state: Any) -> str:
         httpx_client = httpx.AsyncClient()
         created_temp = True
     try:
-        binance_symbols = list(CRYPTO_TRACKED.keys())
-        binance_prices = await fetch_live_binance_24h(httpx_client, binance_symbols)
-        missing_pairs = [s for s in binance_symbols if s not in binance_prices]
-        if missing_pairs:
-            bybit_prices = await fetch_live_bybit_24h(missing_pairs)
-            binance_prices.update(bybit_prices)
+        crypto_symbols_24h = list(CRYPTO_TRACKED.keys())
+        crypto_prices_24h = await fetch_live_crypto_24h(httpx_client, crypto_symbols_24h)
 
         yf_tickers = ["SPY", "QQQ", "UUP", "GLD", "USO", "GC=F", "CL=F", "SI=F", "^VIX"]
         yf_prices = await fetch_live_yf_prices(yf_tickers)
@@ -1234,14 +1252,14 @@ async def fetch_live_market_data(application: Application, state: Any) -> str:
                 return f"{name} last close: ${value:,.0f} ({sign}{pct:.1f}%)"
             return f"{name} ${value:,.0f} ({sign}{pct:.1f}%)"
 
-        btc = binance_prices.get("BTCUSDT", {}).get("last")
-        btc_pct = binance_prices.get("BTCUSDT", {}).get("pct")
-        eth = binance_prices.get("ETHUSDT", {}).get("last")
-        eth_pct = binance_prices.get("ETHUSDT", {}).get("pct")
-        avax = binance_prices.get("AVAXUSDT", {}).get("last")
-        avax_pct = binance_prices.get("AVAXUSDT", {}).get("pct")
-        mnt = binance_prices.get("MNTUSDT", {}).get("last")
-        mnt_pct = binance_prices.get("MNTUSDT", {}).get("pct")
+        btc = crypto_prices_24h.get("BTCUSDT", {}).get("last")
+        btc_pct = crypto_prices_24h.get("BTCUSDT", {}).get("pct")
+        eth = crypto_prices_24h.get("ETHUSDT", {}).get("last")
+        eth_pct = crypto_prices_24h.get("ETHUSDT", {}).get("pct")
+        avax = crypto_prices_24h.get("AVAXUSDT", {}).get("last")
+        avax_pct = crypto_prices_24h.get("AVAXUSDT", {}).get("pct")
+        mnt = crypto_prices_24h.get("MNTUSDT", {}).get("last")
+        mnt_pct = crypto_prices_24h.get("MNTUSDT", {}).get("pct")
 
         spx = yf_prices.get("SPY", {}).get("last")
         spx_pct = yf_prices.get("SPY", {}).get("pct")
@@ -1544,7 +1562,7 @@ async def cmd_analyse(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         trend7: Optional[float] = None
 
         if is_crypto:
-            binance = await fetch_live_binance_24h(httpx_client, [crypto_pair])
+            binance = await fetch_live_crypto_24h(httpx_client, [crypto_pair])
             last = binance.get(crypto_pair, {}).get("last")
             pct24 = binance.get(crypto_pair, {}).get("pct")
 
@@ -1886,16 +1904,21 @@ async def cmd_status_live(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     httpx_client = httpx.AsyncClient()
     try:
-        binance_prices = await fetch_live_binance_24h(httpx_client, list(CRYPTO_TRACKED.keys()))
-        missing_pairs = [s for s in CRYPTO_TRACKED.keys() if s not in binance_prices]
-        if missing_pairs:
-            bybit_prices = await fetch_live_bybit_24h(missing_pairs)
-            binance_prices.update(bybit_prices)
+        # Status is explicit: BTC, ETH, MNT
+        crypto_symbols_24h = ["BTCUSDT", "ETHUSDT", "MNTUSDT"]
+        crypto_prices_24h = await fetch_live_crypto_24h(httpx_client, crypto_symbols_24h)
+
+        # Final fallback for MNT if exchange tickers fail.
+        if "MNTUSDT" not in crypto_prices_24h:
+            _, px, _ = await resolve_coin_price(httpx_client, "MNT")
+            if px is not None:
+                crypto_prices_24h["MNTUSDT"] = {"last": float(px), "pct": None}
+
         yf_prices = await fetch_live_yf_prices(["SPY", "QQQ", "UUP", "GLD", "USO", "GC=F", "CL=F", "SI=F", "^VIX"])
         fng = await fetch_fear_greed(httpx_client, state)
         fng_val, fng_label = fmt_fng(fng)
     except Exception:
-        binance_prices = {}
+        crypto_prices_24h = {}
         yf_prices = {}
         fng_val, fng_label = 0, "Neutral"
     finally:
@@ -1912,10 +1935,9 @@ async def cmd_status_live(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         pct_str = f"{sign}{pct:.1f}%" if pct is not None else ""
         return f"  {name:<8} {price_str:<14} {arrow} {pct_str}"
 
-    btc   = binance_prices.get("BTCUSDT", {})
-    eth   = binance_prices.get("ETHUSDT", {})
-    avax  = binance_prices.get("AVAXUSDT", {})
-    mnt   = binance_prices.get("MNTUSDT", {})
+    btc = crypto_prices_24h.get("BTCUSDT", {})
+    eth = crypto_prices_24h.get("ETHUSDT", {})
+    mnt = crypto_prices_24h.get("MNTUSDT", {})
     spy   = yf_prices.get("SPY", {})
     qqq   = yf_prices.get("QQQ", {})
     vix   = yf_prices.get("^VIX", {})
@@ -1935,7 +1957,6 @@ async def cmd_status_live(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         "🪙 CRYPTO",
         row("BTC",  btc.get("last"),  btc.get("pct"),  0),
         row("ETH",  eth.get("last"),  eth.get("pct"),  0),
-        row("AVAX", avax.get("last"), avax.get("pct"), 3),
         row("MNT",  mnt.get("last"),  mnt.get("pct"), 4),
         "",
         "📈 US MARKETS",
@@ -1970,10 +1991,7 @@ async def prefetch_initial_prices(app: Application, bot_impl_module: Any, state:
         httpx_client = httpx.AsyncClient()
         created_temp = True
     try:
-        crypto_data = await fetch_live_binance_24h(httpx_client, list(CRYPTO_TRACKED.keys()))
-        missing_pairs = [s for s in CRYPTO_TRACKED.keys() if s not in crypto_data]
-        if missing_pairs:
-            crypto_data.update(await fetch_live_bybit_24h(missing_pairs))
+        crypto_data = await fetch_live_crypto_24h(httpx_client, list(CRYPTO_TRACKED.keys()))
         if hasattr(state, "crypto_snapshots"):
             for pair, payload in crypto_data.items():
                 snap = state.crypto_snapshots.get(pair) if isinstance(state.crypto_snapshots, dict) else None
@@ -2012,7 +2030,7 @@ async def get_symbol_price(application: Application, symbol: str) -> Optional[fl
         # crypto by pair or asset
         if sym in CRYPTO_KEYS_BY_INPUT:
             pair = CRYPTO_KEYS_BY_INPUT[sym]
-            data = await fetch_live_binance_24h(httpx_client, [pair])
+            data = await fetch_live_crypto_24h(httpx_client, [pair])
             px = data.get(pair, {}).get("last")
             if px is not None:
                 return float(px)
@@ -2581,7 +2599,7 @@ async def price_alerts_check_task(app: Application) -> None:
                 if not pair:
                     continue
                 try:
-                    data = await fetch_live_binance_24h(httpx_client, [pair])
+                    data = await fetch_live_crypto_24h(httpx_client, [pair])
                     current = data.get(pair, {}).get("last")
                     if current is None:
                         continue
