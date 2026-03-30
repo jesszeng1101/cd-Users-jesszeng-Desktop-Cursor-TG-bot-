@@ -7,9 +7,14 @@ A personal Telegram bot for learning crypto trading — combining real-time aler
 ## What It Does
 
 ### 🌅 Daily Digests (8 AM + 8 PM SGT)
-Two briefings per day powered by GPT:
-- **Morning** — market regime snapshot, open setups review, top entry opportunity with entry zone / target / stop / R:R / position size
-- **Evening** — market close review, what to watch overnight, setup updates
+Two institutional-quality briefings per day powered by GPT-4o-mini, structured like a pro desk:
+
+**Every digest contains 4 sections:**
+1. **Market Regime** — Risk-On / Risk-Off / Transitional with narrative explanation
+2. **Open Setup Review** — Each active trade tracked with Day counter, entry condition (Met/Pending), and Narrative Status (Strengthening / Weakening / Neutral)
+3. **Top Opportunity** — Full structured setup: Thesis → Narrative Trigger → Entry zone → Target → Stop → R:R → Positioning Check → What Kills It. Only shown if R:R ≥ 2:1
+4. **Upcoming Catalysts** — 2-3 known events this week with: Consensus expectation, Confirms narrative if / Breaks narrative if, impact on open setups
+5. **Bottom Line — Next 48 Hours** — 2-3 sentences: most important level to watch, exact action if triggered. Written direct, no hedging
 
 ### 🔴 Smart News Alerts
 Monitors CoinDesk + CoinTelegraph every 5 minutes. When a high-impact headline hits (Fed, ETF, SEC, hack, listing, etc.), GPT instantly explains:
@@ -25,7 +30,16 @@ Live Binance WebSocket on 15-min candles:
 - Volume spike ≥ 1.8× 7-day average
 - Manual price level crosses (BTC/ETH)
 
-### 🤖 AI Chat (GPT-4o-mini)
+### 🤖 AI Chat (GPT-4o-mini) — Institutional System Prompt
+All AI responses follow a structured macro swing trader format:
+- **THESIS** — 1 sentence: structural reason the trade exists
+- **NARRATIVE TRIGGER** — specific event or level that activates the trade
+- **EXACT LEVELS** — entry zone, target, stop (ranges never wider than $500 for crypto)
+- **R:R ratio** — only recommended if ≥ 2:1; if below, says AVOID in one line
+- **POSITIONING CHECK** — RSI-proxy crowding: "crowded long" / "crowded short" / "neutral"
+- **WHAT KILLS IT** — 2 specific scenarios that invalidate the thesis
+- **Timeframe** — TACTICAL (3-7 days) or POSITIONAL (2-4 weeks)
+
 Ask anything directly in chat or use commands:
 
 | Command | What it does |
@@ -144,9 +158,11 @@ This repo includes a `Dockerfile` and `railway.toml` for one-click Railway deplo
 
 ## Design Principles
 
-- **Narrative first** — every alert explains *why*, not just *what*
-- **Beginner-friendly** — no jargon without explanation
-- **R:R ≥ 1:2** — only recommend trades with good risk/reward
+- **Thesis-first** — every setup starts with *why the trade exists*, not just price levels
+- **Narrative trigger** — trade only activates at a specific event or level, not just any price
+- **R:R ≥ 2:1** — if risk/reward is below 2:1, bot says AVOID with no lengthy explanation
+- **Token efficiency** — no filler phrases, no repeated data, every sentence adds new information
+- **Crowding awareness** — RSI proxy used to flag crowded longs/shorts before entry
 - **$50–$100 position sizes** — sized for a $1k–$10k learning budget
 - **No leverage, no futures** — spot only
 

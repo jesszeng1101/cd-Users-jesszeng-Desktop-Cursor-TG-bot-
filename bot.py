@@ -1324,24 +1324,50 @@ async def call_openai_for_text(
     portfolio_text = json.dumps(ai_manager.portfolio, ensure_ascii=False)
 
     system_prompt = (
-        "You are a professional macro analyst and swing trader writing for a beginner in Taiwan "
-        "with a $1,000-$10,000 budget whose goal is small consistent gains.\n\n"
-        "Analysis style:\n"
-        "- Lead with NARRATIVE not data\n"
-        "- Identify divergences — these are the signals\n"
-        "- Explain WHO is buying/selling and WHY\n"
-        "- Connect every move to bigger macro picture\n"
-        "- Give specific actionable levels\n"
-        "- Think in scenarios: confirms vs kills thesis\n"
-        "- R:R must be >= 1:2 or don't recommend\n\n"
-        "Rules:\n"
-        "- Never recommend leverage or futures\n"
-        "- Always suggest $50-100 position size\n"
-        "- Explain all jargon for a beginner\n"
-        "- Keep replies under 5 sentences unless user asks for more or command requires structure\n"
-        "- End every response: ⚠️ Not financial advice.\n\n"
-        f"Context injected:\nLive data: {live_market_data}\n"
-        f"Weekly context: {weekly_context}\n"
+        "You are a macro swing trader writing a daily digest for a beginner in Taiwan, "
+        "$1k-$10k budget, goal: small consistent gains.\n\n"
+        "ANALYSIS RULES — follow exactly:\n"
+        "- Lead with THESIS (1 sentence: why this trade exists)\n"
+        "- Identify the NARRATIVE TRIGGER (what specific event/level confirms the trade is live)\n"
+        "- Give EXACT levels: entry zone, target, stop\n"
+        "- Calculate R:R ratio — only recommend if >= 2:1\n"
+        "- POSITIONING CHECK: use RSI proxy:\n"
+        "  RSI>70 = crowded long (100th percentile language)\n"
+        "  RSI<30 = crowded short\n"
+        "  RSI 50-70 = neutral/mild long bias\n"
+        "  RSI 30-50 = neutral/mild short bias\n"
+        "- WHAT KILLS IT: 2 specific scenarios that invalidate the thesis\n"
+        "- Timeframe: TACTICAL (3-7 days) or POSITIONAL (2-4 weeks)\n\n"
+        "OUTPUT FORMAT — use exactly this structure when asked for a setup:\n\n"
+        "SETUP — {SYMBOL} {LONG/SHORT}\n"
+        "Type: {TACTICAL/POSITIONAL}\n"
+        "Conviction: {Low/Medium/High}\n\n"
+        "THESIS\n"
+        "{1-2 sentences: structural reason this trade exists}\n\n"
+        "NARRATIVE TRIGGER\n"
+        "{Specific event or price level that activates trade}\n\n"
+        "ENTRY\n"
+        "{Exact zone. Note if current price is already in zone.}\n\n"
+        "TARGET\n"
+        "{Exact level with 1 sentence why}\n\n"
+        "STOP\n"
+        "{Exact level with 1 sentence — what it means if hit}\n\n"
+        "RISK/REWARD\n"
+        "{X:1 at current entry}\n\n"
+        "POSITIONING CHECK\n"
+        "{Crowding assessment using RSI proxy with percentile language}\n\n"
+        "WHAT KILLS IT\n"
+        "{Two specific scenarios}\n\n"
+        "TOKEN EFFICIENCY RULES:\n"
+        "- No filler phrases: 'it's important to note', 'as a beginner', 'please remember'\n"
+        "- No repeating data already shown in header\n"
+        "- Every sentence must add new information\n"
+        "- If R:R < 2:1, say AVOID in one line — no lengthy explanation\n"
+        "- Use exact numbers always, never ranges wider than $500 for crypto, $5 for commodities\n\n"
+        "Always end: ⚠️ Not financial advice. Budget reminder: $50-100 max per trade.\n\n"
+        f"Injected context:\n"
+        f"Live data: {live_market_data}\n"
+        f"Weekly: {weekly_context}\n"
         f"Portfolio: {portfolio_text}\n"
         f"Memory: {memory_last5}\n"
         f"Any-coin lookup: {any_coin_context}\n"
@@ -1655,50 +1681,53 @@ async def cmd_review(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not update.message:
         return
     state = context.application.bot_data.get("state")
+    ai_manager: Optional[AiManager] = context.application.bot_data.get("ai_manager")
     try:
-        # Build regime snapshot from available live data.
         live = await fetch_live_market_data(context.application, state)
-        # Pull key percent values quickly from parsed live string.
-        def _extract_pct(name: str) -> Optional[float]:
-            m = re.search(rf"{re.escape(name)}[^\\(]*\\(([+-]?[0-9]+(?:\\.[0-9]+)?)%\\)", live)
-            if not m:
-                return None
-            try:
-                return float(m.group(1))
-            except Exception:
-                return None
 
-        spy_pct = _extract_pct("SPY")
-        vix_pct = _extract_pct("VIX")
-        btc_pct = _extract_pct("BTC")
-        gold_pct = _extract_pct("Gold")
-        regime, narrative, divergence, edge = compute_regime(spy_pct, vix_pct, btc_pct, gold_pct)
-        regime_block = (
-            f"🌐 REGIME SNAPSHOT\n"
-            f"Regime: {regime}\n"
-            f"Narrative: {narrative}\n"
-            f"Divergence: {divergence}\n"
-            f"Edge: {edge}"
+        def _extract_pct(name: str) -> Optional[float]:
+            m = re.search(rf"{re.escape(name)}[^\(]*\(([+-]?[0-9]+(?:\.[0-9]+)?)%\)", live)
+            return float(m.group(1)) if m else None
+
+        regime, narrative, divergence, edge = compute_regime(
+            _extract_pct("SPY"), _extract_pct("VIX"), _extract_pct("BTC"), _extract_pct("Gold")
         )
 
+        extra = (
+            f"Regime: {regime}. {narrative}\n"
+            f"Edge: {edge}\n\n"
+            "Respond with EXACTLY these 2 sections. No intro, no filler.\n\n"
+            "━━ MARKET SUMMARY\n"
+            "[What looks interesting, what to avoid, overall mood. "
+            "Name the one best asset to watch today and the specific level that confirms or kills it.]\n\n"
+            "━━ BOTTOM LINE — NEXT 48 HOURS\n"
+            "[2-3 sentences: most important thing to watch, specific price level or event, "
+            "exact action if triggered. Direct and specific — like briefing a junior trader.]\n\n"
+            "⚠️ Not financial advice. $50-100 max per trade."
+        )
         reply, _, _ = await call_openai_for_text(
             application=context.application,
             state=state,
             user_id=update.effective_user.id,
             user_text="Review the market right now for all tracked assets.",
-            extra_user_instruction=(
-                "Give a 1-paragraph market summary (plain English): what looks interesting, what to avoid today, and overall mood. "
-                "End with one specific asset to watch today and why. "
-                "If any market data is missing, explicitly say 'unavailable' and continue."
-            ),
+            extra_user_instruction=extra,
         )
-        body = reply if reply else "Market review is partially unavailable right now. Key fields are unavailable."
-        full = f"{body}\n\n{regime_block}\n\n⚠️ Not financial advice. Do your own research."
-        await update.message.reply_text(escape_for_html(full), parse_mode="HTML", disable_web_page_preview=True)
+        sgt_now = now_utc().astimezone(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M SGT")
+        header = (
+            f"📊 MARKET REVIEW — {sgt_now}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Regime: {regime} | {narrative}\n\n"
+        )
+        body = reply if reply else "Market review unavailable right now."
+        await update.message.reply_text(
+            escape_for_html(header + body),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
     except Exception as exc:
         log_err(f"/review error: {exc}")
         await update.message.reply_text(
-            "Market review partially unavailable right now; some data is unavailable, but bot is still running.",
+            "Market review unavailable right now.",
             parse_mode="HTML",
             disable_web_page_preview=True,
         )
@@ -2030,6 +2059,38 @@ async def portfolio_alerts_task(app: Application) -> None:
                 log_err(f"portfolio alert error {sym}: {exc}")
 
 
+def _setup_day_and_status(s: dict, current: float) -> tuple[int, str, str]:
+    """Return (day_number, entry_condition, narrative_status) for a setup."""
+    created_raw = s.get("created_at", "")
+    day_num = 1
+    try:
+        created_dt = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+        day_num = max(1, (now_utc() - created_dt).days + 1)
+    except Exception:
+        pass
+    direction = str(s.get("direction", "LONG")).upper()
+    entry = float(s.get("entry", 0.0))
+    target_px = float(s.get("target", 0.0))
+    stop_px = float(s.get("stop", 0.0))
+    # Entry condition
+    in_zone = (direction == "LONG" and current <= entry) or (direction == "SHORT" and current >= entry)
+    entry_cond = f"✅ Met at ${current:,.2f}" if in_zone else f"⏳ Pending — now ${current:,.2f}"
+    # Narrative status: is price moving toward target or stop?
+    if entry == 0 or target_px == 0 or stop_px == 0:
+        narr = "Neutral"
+    elif direction == "LONG":
+        total_range = target_px - stop_px
+        progress = current - stop_px
+        pct_progress = (progress / total_range * 100.0) if total_range else 50.0
+        narr = "Strengthening" if pct_progress > 60 else ("Weakening" if pct_progress < 35 else "Neutral")
+    else:
+        total_range = stop_px - target_px
+        progress = stop_px - current
+        pct_progress = (progress / total_range * 100.0) if total_range else 50.0
+        narr = "Strengthening" if pct_progress > 60 else ("Weakening" if pct_progress < 35 else "Neutral")
+    return day_num, entry_cond, narr
+
+
 async def _build_digest(app: Application, state: Any, is_morning: bool) -> str:
     """Build the full digest text for morning (8 AM) or evening (8 PM) SGT."""
     ai_manager: Optional[AiManager] = app.bot_data.get("ai_manager")
@@ -2052,81 +2113,103 @@ async def _build_digest(app: Application, state: Any, is_morning: bool) -> str:
         "🌐 MARKET REGIME",
         f"Regime: {regime}",
         f"Story: {narrative}",
-        f"Divergence: {divergence}",
         f"Edge: {edge}",
         "",
         "📊 LIVE SNAPSHOT",
         live,
         "",
-        "📋 OPEN SETUPS",
     ]
 
+    # ── OPEN SETUP REVIEW ──────────────────────────────────────────────
+    lines.append("📋 OPEN SETUP REVIEW")
     setups = (ai_manager.memory.get("open_setups", []) if ai_manager else []) or []
+    setup_summaries: list[str] = []  # feed into GPT for action suggestions
     if not isinstance(setups, list) or not setups:
         lines.append("No open setups.")
     else:
+        today_sgt = now_utc().astimezone(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
         for i, s in enumerate(setups, 1):
             sym = str(s.get("symbol", "N/A")).upper()
             direction = str(s.get("direction", "N/A")).upper()
             entry = float(s.get("entry", 0.0))
             target_px = float(s.get("target", 0.0))
             stop_px = float(s.get("stop", 0.0))
+            created_date = ""
+            try:
+                created_date = datetime.fromisoformat(
+                    s.get("created_at", "").replace("Z", "+00:00")
+                ).astimezone(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
+            except Exception:
+                created_date = today_sgt
             current = await get_symbol_price(app, sym)
             if current is None:
                 current = entry
-            met = "✅ Met" if ((direction == "LONG" and current <= entry) or (direction == "SHORT" and current >= entry)) else "⏳ Pending"
-            pnl = ((current - entry) / entry * 100.0) if entry else 0.0
-            status = "IN PLAY"
+            day_num, entry_cond, narr_status = _setup_day_and_status(s, current)
+            # Overall status
+            trade_status = "IN PLAY"
             if direction == "LONG" and current >= target_px:
-                status = "🎯 TARGET HIT"
+                trade_status = "🎯 TARGET HIT"
             elif direction == "LONG" and current <= stop_px:
-                status = "🛑 STOPPED OUT"
+                trade_status = "🛑 STOPPED OUT"
             elif direction == "SHORT" and current <= target_px:
-                status = "🎯 TARGET HIT"
+                trade_status = "🎯 TARGET HIT"
             elif direction == "SHORT" and current >= stop_px:
-                status = "🛑 STOPPED OUT"
+                trade_status = "🛑 STOPPED OUT"
+            narr_icon = "📈" if narr_status == "Strengthening" else ("📉" if narr_status == "Weakening" else "➡️")
             lines.extend([
-                f"SETUP-{i} — {sym} {direction}",
-                f"Entry: ${entry:,.2f} {met}",
-                f"Now: ${current:,.2f} | Target: ${target_px:,.2f} | Stop: ${stop_px:,.2f}",
-                f"P&L if entered: {pnl:+.2f}% | Status: {status}",
+                f"SETUP-{created_date}-{i} {sym} {direction} — Day {day_num}",
+                f"Entry condition: {entry_cond}",
+                f"Narrative: {narr_icon} {narr_status} | Status: {trade_status}",
+                f"Levels: Entry ${entry:,.2f} → Target ${target_px:,.2f} | Stop ${stop_px:,.2f}",
             ])
+            setup_summaries.append(
+                f"{sym} {direction} Day {day_num}: now ${current:,.2f}, entry ${entry:,.2f}, "
+                f"target ${target_px:,.2f}, stop ${stop_px:,.2f}, narrative {narr_status}"
+            )
+    lines.append("")
 
-    # GPT-powered entry + sizing section
+    # ── SINGLE GPT CALL: TOP OPPORTUNITY + CATALYST CALENDAR + BOTTOM LINE ──
     if ai_manager:
         ok, _ = ai_manager.can_call()
         if ok and ai_manager.client:
             ai_manager.mark_called()
-            session_ctx = "market open — focus on entry opportunities" if is_morning else "market close — focus on review and overnight watch"
+            session_ctx = "market open" if is_morning else "market close / overnight watch"
+            setups_ctx = "\n".join(setup_summaries) if setup_summaries else "None"
             gpt_prompt = (
-                f"You are briefing a beginner crypto trader. Session: {session_ctx}.\n"
-                f"Current market data: {live}\n"
-                f"Regime: {regime}. {narrative}\n\n"
-                "Provide EXACTLY this structure (fill in values, no extra text, no curly braces):\n\n"
-                "🎯 TOP OPPORTUNITY TODAY\n"
-                "Asset: [name]  |  Direction: [LONG/SHORT/WAIT]\n"
-                "Entry zone: $X–$X\n"
-                "Target: $X (+X%)  |  Stop: $X (-X%)\n"
-                "R:R: 1:X\n"
-                "Position size: $50–$100\n"
-                "Why now: [1 sentence — macro reason + technical confirmation needed]\n\n"
-                "📉 RISK TO WATCH\n"
-                "[1 sentence — the biggest macro/technical risk that could wreck this setup]\n\n"
-                "💡 LEARNING MOMENT\n"
-                "[1 sentence — one trading mechanic this setup teaches, e.g. 'volume confirmation', 'support flip']\n\n"
-                "Only recommend if R:R >= 1:2. If no clean setup exists, say 'No clean setup — stay in cash until X confirms.'\n"
-                "⚠️ Not financial advice."
+                f"Session: {session_ctx}. Regime: {regime}. {narrative}\n"
+                f"Live data: {live}\n"
+                f"Open setups: {setups_ctx}\n\n"
+                "Respond with EXACTLY these 3 sections. No intro, no filler, no curly braces.\n\n"
+                "━━ TOP OPPORTUNITY\n"
+                "SETUP — [SYMBOL] [LONG/SHORT/WAIT]\n"
+                "Type: [TACTICAL/POSITIONAL]\n"
+                "Conviction: [Low/Medium/High]\n"
+                "THESIS\n[1 sentence: structural reason]\n"
+                "NARRATIVE TRIGGER\n[Specific price level or event that activates trade]\n"
+                "ENTRY\n[$X–$X zone]\n"
+                "TARGET\n[$X — 1 sentence why]\n"
+                "STOP\n[$X — what it means if hit]\n"
+                "RISK/REWARD\n[X:1]\n"
+                "POSITIONING CHECK\n[RSI proxy crowding assessment]\n"
+                "WHAT KILLS IT\n[Two specific scenarios]\n"
+                "If R:R < 2:1 write: AVOID — no clean setup. Stay cash until [specific level].\n\n"
+                "━━ UPCOMING CATALYSTS\n"
+                "List 2-3 known events this week:\n"
+                "[Event name] | Consensus: [expectation] | Confirms if: [outcome] | Breaks if: [outcome] | Setup impact: [1 sentence]\n\n"
+                "━━ BOTTOM LINE — NEXT 48 HOURS\n"
+                "[2-3 sentences: most important thing to watch, specific price level or event, "
+                "exact action if triggered. Direct and specific — like briefing a junior trader.]\n\n"
+                "⚠️ Not financial advice. $50-100 max per trade."
             )
             try:
                 resp = await asyncio.to_thread(
                     ai_manager.client.chat.completions.create,
                     model="gpt-4o-mini",
                     messages=[{"role": "user", "content": gpt_prompt}],
-                    max_tokens=400,
+                    max_tokens=800,
                 )
                 gpt_section = (resp.choices[0].message.content or "").strip()
                 if gpt_section:
-                    lines.append("")
                     lines.append(gpt_section)
             except Exception as exc:
                 log_err(f"digest gpt error: {exc}")
