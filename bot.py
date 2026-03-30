@@ -2630,11 +2630,14 @@ def run_ai_bot() -> None:
     state = bot_impl.BotState(config=config)
     app = bot_impl.build_app(state)
 
-    # Remove bot_impl handlers we replace locally.
+    # Remove bot_impl handlers we replace locally — match by command name, not function ref.
+    _commands_to_replace = {"status", "learn", "levels", "analyse", "scenario",
+                            "ask", "review", "addsetup", "addposition",
+                            "removeposition", "setbudget", "portfolio"}
     for group, handlers in list(app.handlers.items()):
         for handler in list(handlers):
-            cb = getattr(handler, "callback", None)
-            if cb in {bot_impl.cmd_learn, bot_impl.cmd_levels, bot_impl.cmd_status}:
+            cmds = getattr(handler, "commands", None)
+            if cmds and cmds & _commands_to_replace:
                 app.remove_handler(handler, group=group)
 
     # AI manager stored in app.bot_data for handlers.
