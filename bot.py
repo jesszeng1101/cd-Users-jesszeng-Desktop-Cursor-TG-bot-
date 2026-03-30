@@ -2169,6 +2169,101 @@ async def daily_open_setups_task(app: Application) -> None:
             log_err(f"digest send failed: {exc}")
 
 
+async def cmd_config(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show all active config values (overrides + env vars)."""
+    from optimizer_agent import get_all_active_config, _load_overrides
+    if not update.message:
+        return
+    active = get_all_active_config()
+    overrides = _load_overrides()
+    active_keys = set(overrides.get("active", {}).keys())
+    lines = ["⚙️ ACTIVE CONFIG", "━━━━━━━━━━━━━━━━━━━━━━━"]
+    for k, v in active.items():
+        tag = " 🔧 (override)" if k in active_keys else ""
+        lines.append(f"{k} = {v}{tag}")
+    pending = overrides.get("pending", [])
+    if pending:
+        lines.append("")
+        lines.append(f"⏳ {len(pending)} pending recommendation(s) — use /approve N or /reject N")
+    lines.append("")
+    lines.append("Use /resetconfig PARAM to revert any override to default.")
+    await update.message.reply_text("\n".join(lines))
+
+
+async def cmd_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/approve N — apply the Nth pending optimizer recommendation."""
+    from optimizer_agent import approve_recommendation, get_pending_recommendations
+    if not update.message:
+        return
+    if not context.args:
+        pending = get_pending_recommendations()
+        if not pending:
+            await update.message.reply_text("No pending recommendations. Run /config to check.")
+            return
+        lines = ["⏳ PENDING RECOMMENDATIONS"]
+        for i, r in enumerate(pending, 1):
+            lines.append(f"[{i}] {r['parameter']}: {r['current_value']} → {r['suggested_value']}")
+            lines.append(f"     {r['reason']}")
+        lines.append("\nUse /approve N to apply or /reject N to dismiss.")
+        await update.message.reply_text("\n".join(lines))
+        return
+    try:
+        idx = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("Usage: /approve 1")
+        return
+    rec = approve_recommendation(idx)
+    if rec is None:
+        await update.message.reply_text(f"No recommendation #{idx}. Use /approve to see the list.")
+        return
+    await update.message.reply_text(
+        f"✅ Applied: {rec['parameter']} = {rec['suggested_value']}\n"
+        f"Reason: {rec['reason']}\n"
+        f"Takes effect immediately — no restart needed."
+    )
+
+
+async def cmd_reject(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/reject N — dismiss the Nth pending optimizer recommendation."""
+    from optimizer_agent import reject_recommendation
+    if not update.message:
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /reject 1")
+        return
+    try:
+        idx = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("Usage: /reject 1")
+        return
+    rec = reject_recommendation(idx)
+    if rec is None:
+        await update.message.reply_text(f"No recommendation #{idx}.")
+        return
+    await update.message.reply_text(
+        f"❌ Rejected: {rec['parameter']} stays at {rec['current_value']}."
+    )
+
+
+async def cmd_resetconfig(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/resetconfig PARAM — revert an override back to env var / default."""
+    from optimizer_agent import reset_override, get_all_active_config
+    if not update.message:
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /resetconfig RSI_HIGH")
+        return
+    param = context.args[0].strip().upper()
+    removed = reset_override(param)
+    if removed:
+        new_val = get_all_active_config().get(param, "unknown")
+        await update.message.reply_text(
+            f"↩️ {param} override removed. Now using: {new_val} (from env/default)."
+        )
+    else:
+        await update.message.reply_text(f"No active override for {param}.")
+
+
 def run_ai_bot() -> None:
     import bot_impl
 
@@ -2205,6 +2300,11 @@ def run_ai_bot() -> None:
     app.add_handler(CommandHandler("removeposition", cmd_removeposition))
     app.add_handler(CommandHandler("setbudget", cmd_setbudget))
     app.add_handler(CommandHandler("portfolio", cmd_portfolio))
+    # Optimizer config commands
+    app.add_handler(CommandHandler("config", cmd_config))
+    app.add_handler(CommandHandler("approve", cmd_approve))
+    app.add_handler(CommandHandler("reject", cmd_reject))
+    app.add_handler(CommandHandler("resetconfig", cmd_resetconfig))
 
     # Free chat: any non-command text goes to GPT.
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_free_chat))

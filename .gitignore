@@ -8,6 +8,7 @@ memory.json
 portfolio.json
 alert_history.json
 optimizer_report.json
+config_overrides.json
 
 # Python
 __pycache__/
