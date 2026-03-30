@@ -775,8 +775,7 @@ CRYPTO_TRACKED = {
     "BTCUSDT": "BTC",
     "ETHUSDT": "ETH",
     "SOLUSDT": "SOL",
-    "BNBUSDT": "BNB",
-    "AVAXUSDT": "AVAX",
+    "MNTUSDT": "MNT",
 }
 CRYPTO_KEYS_BY_INPUT = {**{v: k for k, v in CRYPTO_TRACKED.items()}, **{k: k for k in CRYPTO_TRACKED.keys()}}
 
@@ -2330,6 +2329,44 @@ async def cmd_reject(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     )
 
 
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show all available commands."""
+    if not update.message:
+        return
+    text = (
+        "📖 ALL COMMANDS\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "📊 MARKET INTEL\n"
+        "/status — Live prices (BTC/ETH/SOL/MNT + stocks)\n"
+        "/review — Market regime + summary + Bottom Line\n"
+        "/analyse BTC — Full setup: Thesis→Entry→Target→Stop→R:R\n"
+        "/levels BTC — Key support & resistance levels\n"
+        "/scenario CPI hot — What-if macro scenario\n"
+        "/ask {question} — Any market question\n"
+        "/learn RSI — Explain any trading concept\n\n"
+        "💼 PORTFOLIO\n"
+        "/portfolio — P&L snapshot of all positions\n"
+        "/addposition BTC 0.01 65000 — Log a trade entry\n"
+        "/removeposition BTC — Remove a position\n"
+        "/setbudget 5000 — Set your total budget\n\n"
+        "📋 SETUPS\n"
+        "/addsetup BTC LONG 95000 105000 89000 — Track a setup\n"
+        "  Format: symbol direction entry target stop\n\n"
+        "⚙️ CONFIG (optimizer)\n"
+        "/config — Show all active thresholds\n"
+        "/approve 1 — Apply optimizer recommendation #1\n"
+        "/reject 1 — Dismiss recommendation #1\n"
+        "/resetconfig RSI_HIGH — Revert an override\n\n"
+        "💬 FREE CHAT\n"
+        "Just type anything — GPT responds with macro context\n\n"
+        "⏰ AUTO DIGESTS\n"
+        "8:00 AM SGT — Morning brief\n"
+        "8:00 PM SGT — Evening brief\n"
+        "Sunday midnight — Weekly optimizer report"
+    )
+    await update.message.reply_text(text)
+
+
 async def cmd_resetconfig(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/resetconfig PARAM — revert an override back to env var / default."""
     from optimizer_agent import reset_override, get_all_active_config
@@ -2390,12 +2427,34 @@ def run_ai_bot() -> None:
     app.add_handler(CommandHandler("approve", cmd_approve))
     app.add_handler(CommandHandler("reject", cmd_reject))
     app.add_handler(CommandHandler("resetconfig", cmd_resetconfig))
+    app.add_handler(CommandHandler("help", cmd_help))
 
     # Free chat: any non-command text goes to GPT.
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_free_chat))
 
     # Keep existing alert modules/tasks + start AI helper tasks.
     async def post_init_with_extras(a: Application) -> None:
+        # Register commands with Telegram so they appear in the / menu
+        from telegram import BotCommand
+        await a.bot.set_my_commands([
+            BotCommand("help",           "Show all commands"),
+            BotCommand("status",         "Live prices — crypto + stocks"),
+            BotCommand("review",         "Market regime + Bottom Line"),
+            BotCommand("analyse",        "Full setup analysis — /analyse BTC"),
+            BotCommand("levels",         "Support & resistance — /levels BTC"),
+            BotCommand("ask",            "Any market question — /ask {question}"),
+            BotCommand("scenario",       "What-if macro — /scenario {situation}"),
+            BotCommand("learn",          "Explain a concept — /learn RSI"),
+            BotCommand("portfolio",      "P&L snapshot"),
+            BotCommand("addposition",    "Log a trade — /addposition BTC 0.01 65000"),
+            BotCommand("removeposition", "Remove a position"),
+            BotCommand("setbudget",      "Set total budget — /setbudget 5000"),
+            BotCommand("addsetup",       "Track a setup — /addsetup BTC LONG 95000 105000 89000"),
+            BotCommand("config",         "Show active thresholds"),
+            BotCommand("approve",        "Apply optimizer rec — /approve 1"),
+            BotCommand("reject",         "Dismiss optimizer rec — /reject 1"),
+            BotCommand("resetconfig",    "Revert an override — /resetconfig RSI_HIGH"),
+        ])
         # Prime prices first so cache-backed modules/commands are ready.
         await prefetch_initial_prices(a, bot_impl, state)
         await bot_impl.on_startup(a)
