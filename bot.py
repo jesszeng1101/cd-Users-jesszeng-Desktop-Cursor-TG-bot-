@@ -1120,29 +1120,31 @@ async def fetch_live_binance_24h(httpx_client: httpx.AsyncClient, symbols: list[
 
 def _yf_last_and_pct_sync(ticker: str) -> tuple[Optional[float], Optional[float], bool]:
     t = yf.Ticker(ticker)
+
+    # yfinance >= 0.2: fast_info is an object, use attribute access not .get()
     try:
-        info = t.fast_info or {}
-        last = info.get("last_price") or info.get("lastPrice")
-        prev = info.get("previous_close") or info.get("previousClose")
-        market_open = bool(info.get("is_market_open", False))
-        if last is not None and prev not in (None, 0):
-            last_f = float(last)
-            prev_f = float(prev)
-            pct = (last_f - prev_f) / prev_f * 100.0 if prev_f else None
-            return last_f, pct, market_open
+        fi = t.fast_info
+        last = getattr(fi, "last_price", None)
+        prev = getattr(fi, "previous_close", None)
+        market_open = bool(getattr(fi, "market_state", "") == "REGULAR")
+        if last and prev and float(prev) != 0:
+            pct = (float(last) - float(prev)) / float(prev) * 100.0
+            return float(last), pct, market_open
     except Exception:
         pass
 
+    # Fallback: pull 5-day daily history
     try:
-        hist = t.history(period="7d", interval="1d", progress=False, auto_adjust=False)
-        if hist is None or hist.empty or len(hist) < 2:
-            return None, None, False
-        last = float(hist["Close"].iloc[-1])
-        prev = float(hist["Close"].iloc[-2])
-        pct = (last - prev) / prev * 100.0 if prev else None
-        return last, pct, False
+        hist = t.history(period="5d", interval="1d", progress=False, auto_adjust=True)
+        if hist is not None and not hist.empty and len(hist) >= 2:
+            last = float(hist["Close"].iloc[-1])
+            prev = float(hist["Close"].iloc[-2])
+            pct = (last - prev) / prev * 100.0 if prev else None
+            return last, pct, False
     except Exception:
-        return None, None, False
+        pass
+
+    return None, None, False
 
 
 async def fetch_live_yf_prices(tickers: list[str]) -> dict[str, dict[str, float]]:
