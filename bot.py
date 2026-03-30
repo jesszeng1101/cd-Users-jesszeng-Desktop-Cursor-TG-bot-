@@ -1733,82 +1733,89 @@ async def cmd_review(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def cmd_levels(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Deterministic proxy levels: blend 24h and 7d highs/lows.
-    state = context.application.bot_data.get("state")
-    if state is None or not update.message:
+    if not update.message:
         return
     if not context.args:
-        await update.message.reply_text("Usage: /levels {symbol}", parse_mode="HTML")
+        await update.message.reply_text("Usage: /levels {symbol}  e.g. /levels BTC", parse_mode="HTML")
         return
-    sym = " ".join(context.args).strip().upper()
-    httpx_client: Optional[httpx.AsyncClient] = context.application.bot_data.get("httpx_client")
-    if httpx_client is None:
-        httpx_client = httpx.AsyncClient()
 
-    crypto_pair = CRYPTO_KEYS_BY_INPUT.get(sym)
-    if crypto_pair:
-        try:
-            # 24h and 7d 15m candles
+    sym = " ".join(context.args).strip().upper()
+
+    # Always create a fresh client to avoid stale connection issues
+    httpx_client = httpx.AsyncClient()
+    try:
+        crypto_pair = CRYPTO_KEYS_BY_INPUT.get(sym)
+        if crypto_pair:
             kl_24 = await fetch_klines(httpx_client, crypto_pair, "15m", 96)
-            kl_7d = await fetch_klines(httpx_client, crypto_pair, "15m", 672)
-            low_24 = min(float(k[3]) for k in kl_24 if len(k) > 3)
-            high_24 = max(float(k[2]) for k in kl_24 if len(k) > 2)
-            low_7 = min(float(k[3]) for k in kl_7d if len(k) > 3)
-            high_7 = max(float(k[2]) for k in kl_7d if len(k) > 2)
-            support = (low_24 + low_7) / 2.0
-            resistance = (high_24 + high_7) / 2.0
+            kl_7d = await fetch_klines(httpx_client, crypto_pair, "4h", 42)
+
+            lows_24  = [float(k[3]) for k in kl_24 if len(k) > 3]
+            highs_24 = [float(k[2]) for k in kl_24 if len(k) > 2]
+            lows_7   = [float(k[3]) for k in kl_7d if len(k) > 3]
+            highs_7  = [float(k[2]) for k in kl_7d if len(k) > 2]
+
+            if not lows_24 or not highs_24 or not lows_7 or not highs_7:
+                await update.message.reply_text("⚠️ Not enough candle data for this symbol right now.", parse_mode="HTML")
+                return
+
+            support    = (min(lows_24)  + min(lows_7))  / 2.0
+            resistance = (max(highs_24) + max(highs_7)) / 2.0
+            last_price = highs_24[-1]
             name = CRYPTO_TRACKED.get(crypto_pair, crypto_pair)
             await update.message.reply_text(
-                f"🎯 Levels — {name}\nSupport: ${support:,.0f} | Resistance: ${resistance:,.0f}",
+                f"🎯 LEVELS — {name}\n"
+                f"Price now:   ${last_price:,.4f}\n"
+                f"Support:     ${support:,.4f}\n"
+                f"Resistance:  ${resistance:,.4f}\n\n"
+                f"24h range: ${min(lows_24):,.4f} – ${max(highs_24):,.4f}\n"
+                f"7d range:  ${min(lows_7):,.4f} – ${max(highs_7):,.4f}",
                 parse_mode="HTML",
-                disable_web_page_preview=True,
             )
-        except Exception as exc:
-            log_err(f"/levels error (crypto): {exc}")
-            await update.message.reply_text("⚠️ Unable to calculate levels right now.", parse_mode="HTML")
-        return
-
-    # Stocks/commodities via yfinance
-    yf_ticker = STOCK_KEYS_BY_INPUT.get(sym) or COMMOD_KEYS_BY_INPUT.get(sym)
-    if not yf_ticker:
-        await update.message.reply_text("Unknown symbol. Try BTC, ETH, SOL, BNB, AVAX, SPY, QQQ, Gold, Oil.", parse_mode="HTML")
-        return
-
-    def yf_levels_sync(t: str) -> tuple[Optional[float], Optional[float]]:
-        hist = yf.Ticker(t).history(period="8d", interval="1h", progress=False)
-        if hist is None or hist.empty:
-            return None, None
-        hist = hist.dropna(subset=["High", "Low"])
-        end = hist.index.max()
-        start_24 = end - timedelta(hours=24)
-        start_7 = end - timedelta(days=7)
-        hist_24 = hist[hist.index >= start_24]
-        hist_7 = hist[hist.index >= start_7]
-        if hist_24.empty or hist_7.empty:
-            return None, None
-        low_24 = float(hist_24["Low"].min())
-        high_24 = float(hist_24["High"].max())
-        low_7 = float(hist_7["Low"].min())
-        high_7 = float(hist_7["High"].max())
-        support = (low_24 + low_7) / 2.0
-        resistance = (high_24 + high_7) / 2.0
-        return support, resistance
-
-    try:
-        support, resistance = await asyncio.to_thread(yf_levels_sync, yf_ticker)
-        if support is None or resistance is None:
-            await update.message.reply_text("⚠️ Unable to calculate levels right now.", parse_mode="HTML")
             return
-        # Display name normalization
-        name = "Gold" if yf_ticker == "GLD" else ("Oil" if yf_ticker == "USO" else yf_ticker)
+
+        # Stocks/commodities via yfinance
+        yf_ticker = STOCK_KEYS_BY_INPUT.get(sym) or COMMOD_KEYS_BY_INPUT.get(sym)
+        if not yf_ticker:
+            await update.message.reply_text(
+                "Unknown symbol. Try: BTC ETH SOL MNT SPY QQQ Gold Oil DXY",
+                parse_mode="HTML",
+            )
+            return
+
+        def yf_levels_sync(t: str) -> tuple[Optional[float], Optional[float], Optional[float]]:
+            hist = yf.Ticker(t).history(period="8d", interval="1h", progress=False, auto_adjust=True)
+            if hist is None or hist.empty:
+                return None, None, None
+            hist = hist.dropna(subset=["High", "Low", "Close"])
+            end = hist.index.max()
+            hist_24 = hist[hist.index >= end - timedelta(hours=24)]
+            hist_7  = hist[hist.index >= end - timedelta(days=7)]
+            if hist_24.empty or hist_7.empty:
+                return None, None, None
+            support    = (float(hist_24["Low"].min())  + float(hist_7["Low"].min()))  / 2.0
+            resistance = (float(hist_24["High"].max()) + float(hist_7["High"].max())) / 2.0
+            last       = float(hist["Close"].iloc[-1])
+            return support, resistance, last
+
+        support, resistance, last_price = await asyncio.to_thread(yf_levels_sync, yf_ticker)
+        if support is None or resistance is None:
+            await update.message.reply_text("⚠️ Unable to fetch data for this symbol right now.", parse_mode="HTML")
+            return
+
+        name = "Gold" if yf_ticker == "GLD" else ("Oil" if yf_ticker == "USO" else sym)
         await update.message.reply_text(
-            f"🎯 Levels — {name}\nSupport: ${support:,.0f} | Resistance: ${resistance:,.0f}",
+            f"🎯 LEVELS — {name}\n"
+            f"Price now:   ${last_price:,.2f}\n"
+            f"Support:     ${support:,.2f}\n"
+            f"Resistance:  ${resistance:,.2f}",
             parse_mode="HTML",
-            disable_web_page_preview=True,
         )
+
     except Exception as exc:
-        log_err(f"/levels error (yf): {exc}")
-        await update.message.reply_text("⚠️ Unable to calculate levels right now.", parse_mode="HTML")
+        log_err(f"/levels error ({sym}): {exc}")
+        await update.message.reply_text(f"⚠️ Error fetching levels for {sym}: {exc}", parse_mode="HTML")
+    finally:
+        await httpx_client.aclose()
 
 
 async def cmd_status_live(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2340,7 +2347,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/status — Live prices (BTC/ETH/SOL/MNT + stocks)\n"
         "/review — Market regime + summary + Bottom Line\n"
         "/analyse BTC — Full setup: Thesis→Entry→Target→Stop→R:R\n"
-        "/levels BTC — Key support & resistance levels\n"
+        "/levels BTC — Key support & resistance levels (BTC ETH SOL MNT SPY Gold...)\n"
         "/scenario CPI hot — What-if macro scenario\n"
         "/ask {question} — Any market question\n"
         "/learn RSI — Explain any trading concept\n\n"
