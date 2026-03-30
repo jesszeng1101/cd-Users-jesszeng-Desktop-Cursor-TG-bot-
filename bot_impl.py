@@ -350,6 +350,7 @@ async def send_message_html(app: Application, state: BotState, text: str) -> Non
         digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
         dedup_key = f"alert:{digest}"
         if state.alert_dedup.contains(dedup_key):
+            log_err(f"alert_dedup: suppressed duplicate {dedup_key[-8:]}")
             return None
         # Use a conservative TTL: enough to suppress duplicates, but short enough
         # that meaningful new events can still alert.
