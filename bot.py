@@ -774,7 +774,7 @@ class AiManager:
 CRYPTO_TRACKED = {
     "BTCUSDT": "BTC",
     "ETHUSDT": "ETH",
-    "SOLUSDT": "SOL",
+    "AVAXUSDT": "AVAX",
     "MNTUSDT": "MNT",
 }
 CRYPTO_KEYS_BY_INPUT = {**{v: k for k, v in CRYPTO_TRACKED.items()}, **{k: k for k in CRYPTO_TRACKED.keys()}}
@@ -1117,6 +1117,33 @@ async def fetch_live_binance_24h(httpx_client: httpx.AsyncClient, symbols: list[
     return by_symbol
 
 
+async def fetch_live_bybit_24h(symbols: list[str]) -> dict[str, dict[str, float]]:
+    """
+    Fetch Bybit spot ticker as fallback for pairs not available on Binance.
+    price24hPcnt is decimal (e.g. -0.017), convert to percentage.
+    """
+    out: dict[str, dict[str, float]] = {}
+    async with httpx.AsyncClient() as c:
+        for sym in symbols:
+            try:
+                r = await c.get(
+                    "https://api.bybit.com/v5/market/tickers",
+                    params={"category": "spot", "symbol": sym},
+                    timeout=15.0,
+                )
+                r.raise_for_status()
+                items = ((r.json().get("result") or {}).get("list") or [])
+                if not items:
+                    continue
+                item = items[0]
+                last = float(item.get("lastPrice"))
+                pct_raw = float(item.get("price24hPcnt", 0.0))
+                out[sym.upper()] = {"last": last, "pct": pct_raw * 100.0}
+            except Exception:
+                continue
+    return out
+
+
 def _yf_last_and_pct_sync(ticker: str) -> tuple[Optional[float], Optional[float], bool]:
     t = yf.Ticker(ticker)
 
@@ -1188,6 +1215,10 @@ async def fetch_live_market_data(application: Application, state: Any) -> str:
     try:
         binance_symbols = list(CRYPTO_TRACKED.keys())
         binance_prices = await fetch_live_binance_24h(httpx_client, binance_symbols)
+        missing_pairs = [s for s in binance_symbols if s not in binance_prices]
+        if missing_pairs:
+            bybit_prices = await fetch_live_bybit_24h(missing_pairs)
+            binance_prices.update(bybit_prices)
 
         yf_tickers = ["SPY", "QQQ", "UUP", "GLD", "USO", "GC=F", "CL=F", "SI=F", "^VIX"]
         yf_prices = await fetch_live_yf_prices(yf_tickers)
@@ -1207,10 +1238,8 @@ async def fetch_live_market_data(application: Application, state: Any) -> str:
         btc_pct = binance_prices.get("BTCUSDT", {}).get("pct")
         eth = binance_prices.get("ETHUSDT", {}).get("last")
         eth_pct = binance_prices.get("ETHUSDT", {}).get("pct")
-        sol = binance_prices.get("SOLUSDT", {}).get("last")
-        sol_pct = binance_prices.get("SOLUSDT", {}).get("pct")
-        bnb = binance_prices.get("BNBUSDT", {}).get("last")
-        bnb_pct = binance_prices.get("BNBUSDT", {}).get("pct")
+        avax = binance_prices.get("AVAXUSDT", {}).get("last")
+        avax_pct = binance_prices.get("AVAXUSDT", {}).get("pct")
         mnt = binance_prices.get("MNTUSDT", {}).get("last")
         mnt_pct = binance_prices.get("MNTUSDT", {}).get("pct")
 
@@ -1240,7 +1269,7 @@ async def fetch_live_market_data(application: Application, state: Any) -> str:
         parts = [
             seg("BTC", btc, btc_pct),
             seg("ETH", eth, eth_pct),
-            seg("SOL", sol, sol_pct),
+            seg("AVAX", avax, avax_pct),
             seg("MNT", mnt, mnt_pct),
             seg("SPY", spx, spx_pct, spx_open, is_index=True),
             seg("QQQ", qqq, qqq_pct, qqq_open, is_index=True),
@@ -1467,7 +1496,7 @@ async def cmd_analyse(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "Tap one to send:\n"
             "/analyse BTC\n"
             "/analyse ETH\n"
-            "/analyse SOL\n"
+            "/analyse AVAX\n"
             "/analyse MNT\n"
             "/analyse Gold\n"
             "/analyse SPY\n\n"
@@ -1495,7 +1524,7 @@ async def cmd_analyse(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             ticker_for_yf = commod_ticker
             display_name = commod_ticker
         else:
-            await update.message.reply_text("Unknown symbol. Try BTC, ETH, SOL, BNB, AVAX, SPY, QQQ, Gold, Oil.", parse_mode="HTML")
+            await update.message.reply_text("Unknown symbol. Try BTC, ETH, AVAX, MNT, SPY, QQQ, Gold, Oil.", parse_mode="HTML")
             return
 
     httpx_client: Optional[httpx.AsyncClient] = context.application.bot_data.get("httpx_client")
@@ -1809,7 +1838,7 @@ async def cmd_levels(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         yf_ticker = STOCK_KEYS_BY_INPUT.get(sym) or COMMOD_KEYS_BY_INPUT.get(sym)
         if not yf_ticker:
             await update.message.reply_text(
-                "Unknown symbol. Try: BTC ETH SOL MNT SPY QQQ Gold Oil DXY",
+                "Unknown symbol. Try: BTC ETH AVAX MNT SPY QQQ Gold Oil DXY",
                 parse_mode="HTML",
             )
             return
@@ -1858,9 +1887,17 @@ async def cmd_status_live(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     httpx_client = httpx.AsyncClient()
     try:
         binance_prices = await fetch_live_binance_24h(httpx_client, list(CRYPTO_TRACKED.keys()))
+        missing_pairs = [s for s in CRYPTO_TRACKED.keys() if s not in binance_prices]
+        if missing_pairs:
+            bybit_prices = await fetch_live_bybit_24h(missing_pairs)
+            binance_prices.update(bybit_prices)
         yf_prices = await fetch_live_yf_prices(["SPY", "QQQ", "UUP", "GLD", "USO", "GC=F", "CL=F", "SI=F", "^VIX"])
         fng = await fetch_fear_greed(httpx_client, state)
         fng_val, fng_label = fmt_fng(fng)
+    except Exception:
+        binance_prices = {}
+        yf_prices = {}
+        fng_val, fng_label = 0, "Neutral"
     finally:
         await httpx_client.aclose()
 
@@ -1877,7 +1914,7 @@ async def cmd_status_live(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     btc   = binance_prices.get("BTCUSDT", {})
     eth   = binance_prices.get("ETHUSDT", {})
-    sol   = binance_prices.get("SOLUSDT", {})
+    avax  = binance_prices.get("AVAXUSDT", {})
     mnt   = binance_prices.get("MNTUSDT", {})
     spy   = yf_prices.get("SPY", {})
     qqq   = yf_prices.get("QQQ", {})
@@ -1898,8 +1935,8 @@ async def cmd_status_live(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         "🪙 CRYPTO",
         row("BTC",  btc.get("last"),  btc.get("pct"),  0),
         row("ETH",  eth.get("last"),  eth.get("pct"),  0),
-        row("SOL",  sol.get("last"),  sol.get("pct"),  2),
-        row("MNT",  mnt.get("last"),  mnt.get("pct"),  4),
+        row("AVAX", avax.get("last"), avax.get("pct"), 3),
+        row("MNT",  mnt.get("last"),  mnt.get("pct"), 4),
         "",
         "📈 US MARKETS",
         row("S&P500", spy.get("last"), spy.get("pct"), 0) + mkt_tag(spy),
@@ -1934,6 +1971,9 @@ async def prefetch_initial_prices(app: Application, bot_impl_module: Any, state:
         created_temp = True
     try:
         crypto_data = await fetch_live_binance_24h(httpx_client, list(CRYPTO_TRACKED.keys()))
+        missing_pairs = [s for s in CRYPTO_TRACKED.keys() if s not in crypto_data]
+        if missing_pairs:
+            crypto_data.update(await fetch_live_bybit_24h(missing_pairs))
         if hasattr(state, "crypto_snapshots"):
             for pair, payload in crypto_data.items():
                 snap = state.crypto_snapshots.get(pair) if isinstance(state.crypto_snapshots, dict) else None
@@ -2343,12 +2383,17 @@ async def daily_open_setups_task(app: Application) -> None:
 
         is_morning = (next_target.hour == 8)
         try:
+            sent_key = f"digest_sent_{next_target.strftime('%Y-%m-%d_%H')}"
+            if ai_manager.memory.get(sent_key):
+                continue
             digest_text = await _build_digest(app, state, is_morning=is_morning)
             await app.bot.send_message(
                 chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
                 text=digest_text,
                 parse_mode="HTML",
             )
+            ai_manager.memory[sent_key] = True
+            ai_manager.persist()
         except Exception as exc:
             log_err(f"digest send failed: {exc}")
 
@@ -2565,10 +2610,10 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "📖 ALL COMMANDS\n"
         "━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "📊 MARKET INTEL\n"
-        "/status — Live prices (BTC/ETH/SOL/MNT + stocks)\n"
+        "/status — Live prices (BTC/ETH/AVAX/MNT + stocks)\n"
         "/review — Market regime + summary + Bottom Line\n"
         "/analyse BTC — Full setup: Thesis→Entry→Target→Stop→R:R\n"
-        "/levels BTC — Key support & resistance levels (BTC ETH SOL MNT SPY Gold...)\n"
+        "/levels BTC — Key support & resistance levels (BTC ETH AVAX MNT SPY Gold...)\n"
         "/scenario CPI hot — What-if macro scenario\n"
         "/ask {question} — Any market question\n"
         "/learn RSI — Explain any trading concept\n\n"

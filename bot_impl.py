@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -159,13 +160,14 @@ HIGH_IMPACT_KEYWORDS = [
     "ban",
 ]
 
-CRYPTO_PAIRS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "AVAXUSDT"]
+BINANCE_WS_PAIRS = ["BTCUSDT", "ETHUSDT", "AVAXUSDT"]
+EXTERNAL_CRYPTO_PAIRS = ["MNTUSDT"]
+CRYPTO_PAIRS = BINANCE_WS_PAIRS + EXTERNAL_CRYPTO_PAIRS
 CRYPTO_DISPLAY = {
     "BTCUSDT": "BTC",
     "ETHUSDT": "ETH",
-    "SOLUSDT": "SOL",
-    "BNBUSDT": "BNB",
     "AVAXUSDT": "AVAX",
+    "MNTUSDT": "MNT",
 }
 
 # yfinance tickers
@@ -302,6 +304,8 @@ class BotState:
     stop_event: asyncio.Event = field(default_factory=asyncio.Event)
 
     dedup_news: TTLCache = field(default_factory=TTLCache)
+    alert_dedup: TTLCache = field(default_factory=TTLCache)
+    candle_alert_dedup: TTLCache = field(default_factory=TTLCache)
     recent_news: list[NewsEvent] = field(default_factory=list)  # prune by age
 
     fng_value: Optional[int] = None
@@ -340,6 +344,18 @@ def already_seen(state: BotState, url: str, ttl_seconds: int) -> bool:
 async def send_message_html(app: Application, state: BotState, text: str) -> None:
     if state.config.telegram_chat_id is None or state.is_paused():
         return None
+    # Deduplicate identical alert texts within a short TTL window to prevent repeats.
+    # This addresses repeated WS ticks / accidental re-triggers.
+    try:
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        dedup_key = f"alert:{digest}"
+        if state.alert_dedup.contains(dedup_key):
+            return None
+        # Use a conservative TTL: enough to suppress duplicates, but short enough
+        # that meaningful new events can still alert.
+        state.alert_dedup.add(dedup_key, ttl_seconds=SECONDS_15_MIN)
+    except Exception:
+        pass
     try:
         msg = await app.bot.send_message(
             chat_id=state.config.telegram_chat_id,
@@ -560,6 +576,24 @@ async def fetch_klines_1h(client: httpx.AsyncClient, symbol: str, limit: int) ->
     return data if isinstance(data, list) else []
 
 
+async def fetch_bybit_klines(symbol: str, interval: str, limit: int = 200) -> list[list[Any]]:
+    """
+    Bybit kline response list item:
+    [startTime, open, high, low, close, volume, turnover]
+    Returns ascending-by-time lists.
+    """
+    url = "https://api.bybit.com/v5/market/kline"
+    params = {"category": "spot", "symbol": symbol, "interval": interval, "limit": limit}
+    async with httpx.AsyncClient() as c:
+        r = await c.get(url, params=params, timeout=20.0)
+        r.raise_for_status()
+        payload = r.json()
+    raw = (payload.get("result") or {}).get("list") or []
+    # Bybit returns reverse chronological order; normalize ascending.
+    rows = list(reversed(raw))
+    return rows
+
+
 async def prime_crypto_15m_volume_avgs(state: BotState, client: httpx.AsyncClient) -> None:
     # Uses 7 days of 15m candles to compute average volume baseline.
     # 7 days * 24h * 4 candles/hour = ~672
@@ -597,7 +631,7 @@ async def crypto_price_monitor(app: Application, state: BotState, client: httpx.
     while not state.stop_event.is_set():
         try:
             await prime_crypto_15m_volume_avgs(state, client)
-            streams = "/".join([f"{p.lower()}@kline_15m" for p in CRYPTO_PAIRS])
+            streams = "/".join([f"{p.lower()}@kline_15m" for p in BINANCE_WS_PAIRS])
             ws_url = f"wss://stream.binance.com:9443/stream?streams={streams}"
             async with websockets.connect(ws_url, ping_interval=20, ping_timeout=20) as ws:
                 # Minimal startup log once connected.
@@ -609,7 +643,7 @@ async def crypto_price_monitor(app: Application, state: BotState, client: httpx.
                         payload = json.loads(raw)
                         k = payload.get("data", {}).get("k", {})
                         pair = k.get("s")
-                        if pair not in CRYPTO_PAIRS:
+                        if pair not in BINANCE_WS_PAIRS:
                             continue
 
                         is_closed = bool(k.get("x"))
@@ -669,6 +703,13 @@ async def crypto_price_monitor(app: Application, state: BotState, client: httpx.
 
                         if confidence < 3:
                             continue
+
+                        candle_close_ms = int(k.get("T") or 0)
+                        candle_key = f"candle:{pair}:{candle_close_ms}"
+                        if candle_close_ms and state.candle_alert_dedup.contains(candle_key):
+                            continue
+                        if candle_close_ms:
+                            state.candle_alert_dedup.add(candle_key, ttl_seconds=SECONDS_1_HOUR)
 
                         asset_name = CRYPTO_DISPLAY[pair]
                         sentiment_bullish = state.fng_value is not None and state.fng_value <= state.config.fear_low
@@ -751,6 +792,90 @@ async def crypto_price_monitor(app: Application, state: BotState, client: httpx.
         except Exception as exc:
             log_err(f"crypto monitor error: {exc}")
             await asyncio.sleep(SECONDS_1_MIN)
+
+
+async def external_crypto_monitor(app: Application, state: BotState) -> None:
+    """
+    Monitor non-Binance spot pairs (currently MNTUSDT) using Bybit candles.
+    """
+    while not state.stop_event.is_set():
+        try:
+            for pair in EXTERNAL_CRYPTO_PAIRS:
+                # 15m candles for move + volume ratio
+                kl_15 = await fetch_bybit_klines(pair, "15", limit=200)
+                if len(kl_15) < 30:
+                    continue
+                last = kl_15[-1]
+                start_ms = int(last[0])
+                open_p = float(last[1])
+                close_p = float(last[4])
+                vol = float(last[5])
+                if open_p <= 0:
+                    continue
+
+                move_pct = ((close_p - open_p) / open_p) * 100.0
+                vols = [float(r[5]) for r in kl_15[:-1]]
+                avg_vol = (sum(vols) / len(vols)) if vols else 0.0
+                volume_ratio = (vol / avg_vol) if avg_vol > 0 else 0.0
+
+                # 1h candles for RSI
+                kl_60 = await fetch_bybit_klines(pair, "60", limit=200)
+                closes_1h = [float(r[4]) for r in kl_60]
+                rsi = compute_rsi(closes_1h, RSI_PERIOD)
+
+                snap = state.crypto_snapshots.get(pair) or MarketSnapshot()
+                snap.price = close_p
+                snap.move_pct = move_pct
+                snap.rsi = rsi
+                snap.volume_ratio = volume_ratio
+                snap.rsi_state = rsi_state_label(rsi)
+
+                now = now_utc()
+                confidence = compute_confidence(state, move_pct, rsi, volume_ratio, now)
+                snap.confidence = confidence
+                state.crypto_snapshots[pair] = snap
+
+                if confidence < 3 or state.is_paused():
+                    continue
+
+                candle_key = f"candle:{pair}:{start_ms}"
+                if state.candle_alert_dedup.contains(candle_key):
+                    continue
+                state.candle_alert_dedup.add(candle_key, ttl_seconds=SECONDS_1_HOUR)
+
+                asset_name = CRYPTO_DISPLAY.get(pair, pair)
+                also_watch = "BTC, ETH, AVAX"
+                rsi_label = rsi_state_label(rsi)
+                whats_happening = (
+                    f"{asset_name} moved {move_pct:+.1f}% in the last 15m while volume was {volume_ratio:.1f}× normal. "
+                    f"RSI is {rsi_label.lower()}, which often lines up with momentum extremes."
+                )[:380]
+                action, reason = suggest_action(
+                    asset_name=asset_name,
+                    move_pct=move_pct,
+                    rsi=rsi,
+                    sentiment_bullish=state.fng_value is not None and state.fng_value <= state.config.fear_low,
+                    sentiment_bearish=state.fng_value is not None and state.fng_value >= state.config.greed_high,
+                )
+                suggested_size_line = DEFAULT_SUGGESTED_SIZE_TEXT if action == "CONSIDER ENTRY" else None
+                text = build_critical_alert_text(
+                    asset_name=asset_name,
+                    price=close_p,
+                    move_pct=move_pct,
+                    timeframe="15m",
+                    rsi=rsi,
+                    volume_ratio=volume_ratio,
+                    confidence=confidence,
+                    whats_happening=whats_happening,
+                    action=action,
+                    action_reason=reason,
+                    suggested_size_line=suggested_size_line,
+                    also_watch=also_watch,
+                )
+                await send_message_html(app, state, text)
+        except Exception as exc:
+            log_err(f"external crypto monitor error: {exc}")
+        await asyncio.sleep(SECONDS_1_MIN)
 
 
 def rsi_state_for_extremes(rsi: Optional[float]) -> str:
@@ -1188,6 +1313,11 @@ async def daily_briefing_task(app: Application, state: BotState, client: httpx.A
                 "📌 Not financial advice. Always do your own research."
             )
 
+            digest_key = f"daily_briefing:{now_sgt.date().isoformat()}"
+            if state.alert_dedup.contains(digest_key):
+                continue
+            state.alert_dedup.add(digest_key, ttl_seconds=SECONDS_24_HOURS)
+
             # Send daily briefing even if paused; spec implies routine.
             try:
                 await app.bot.send_message(
@@ -1346,6 +1476,7 @@ async def on_startup(app: Application) -> None:
         asyncio.create_task(news_monitor(app, state, client), name="news_monitor"),
         asyncio.create_task(sentiment_monitor(app, state, client), name="sentiment_monitor"),
         asyncio.create_task(crypto_price_monitor(app, state, client), name="crypto_price_monitor"),
+        asyncio.create_task(external_crypto_monitor(app, state), name="external_crypto_monitor"),
         asyncio.create_task(stocks_monitor(app, state, client), name="stocks_monitor"),
         asyncio.create_task(daily_briefing_task(app, state, client), name="daily_briefing_task"),
     ]
