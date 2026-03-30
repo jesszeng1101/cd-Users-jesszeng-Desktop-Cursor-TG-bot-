@@ -1211,8 +1211,8 @@ async def fetch_live_market_data(application: Application, state: Any) -> str:
         sol_pct = binance_prices.get("SOLUSDT", {}).get("pct")
         bnb = binance_prices.get("BNBUSDT", {}).get("last")
         bnb_pct = binance_prices.get("BNBUSDT", {}).get("pct")
-        avax = binance_prices.get("AVAXUSDT", {}).get("last")
-        avax_pct = binance_prices.get("AVAXUSDT", {}).get("pct")
+        mnt = binance_prices.get("MNTUSDT", {}).get("last")
+        mnt_pct = binance_prices.get("MNTUSDT", {}).get("pct")
 
         spx = yf_prices.get("SPY", {}).get("last")
         spx_pct = yf_prices.get("SPY", {}).get("pct")
@@ -1241,8 +1241,7 @@ async def fetch_live_market_data(application: Application, state: Any) -> str:
             seg("BTC", btc, btc_pct),
             seg("ETH", eth, eth_pct),
             seg("SOL", sol, sol_pct),
-            seg("BNB", bnb, bnb_pct),
-            seg("AVAX", avax, avax_pct),
+            seg("MNT", mnt, mnt_pct),
             seg("SPY", spx, spx_pct, spx_open, is_index=True),
             seg("QQQ", qqq, qqq_pct, qqq_open, is_index=True),
             seg("DXY", dxy, dxy_pct, dxy_open, is_index=True),
@@ -1436,7 +1435,14 @@ async def cmd_ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message:
         return
     if not context.args:
-        await update.message.reply_text("Usage: /ask {question}", parse_mode="HTML")
+        await update.message.reply_text(
+            "Ask me anything about the market. Examples:\n\n"
+            "/ask Why is BTC dropping today?\n"
+            "/ask Is MNT a good buy right now?\n"
+            "/ask What does the Fed rate decision mean for crypto?\n"
+            "/ask Explain support and resistance to me",
+            parse_mode="HTML",
+        )
         return
     question = " ".join(context.args).strip()
     state = context.application.bot_data.get("state")
@@ -1456,7 +1462,18 @@ async def cmd_analyse(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if state is None or not update.message:
         return
     if not context.args:
-        await update.message.reply_text("Usage: /analyse {symbol}", parse_mode="HTML")
+        await update.message.reply_text(
+            "Which token do you want to analyse?\n\n"
+            "Tap one to send:\n"
+            "/analyse BTC\n"
+            "/analyse ETH\n"
+            "/analyse SOL\n"
+            "/analyse MNT\n"
+            "/analyse Gold\n"
+            "/analyse SPY\n\n"
+            "Or type /analyse followed by any symbol.",
+            parse_mode="HTML",
+        )
         return
     symbol_in = " ".join(context.args).strip().upper()
 
@@ -1642,7 +1659,14 @@ async def cmd_scenario(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not update.message:
         return
     if not context.args:
-        await update.message.reply_text("Usage: /scenario {situation}", parse_mode="HTML")
+        await update.message.reply_text(
+            "Describe a macro what-if scenario. Examples:\n\n"
+            "/scenario CPI comes in hotter than expected\n"
+            "/scenario Fed cuts rates by 50bps\n"
+            "/scenario US recession confirmed\n"
+            "/scenario Bitcoin ETF gets rejected",
+            parse_mode="HTML",
+        )
         return
     situation = " ".join(context.args).strip()
     state = context.application.bot_data.get("state")
@@ -1661,7 +1685,15 @@ async def cmd_learn_gpt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not update.message:
         return
     if not context.args:
-        await update.message.reply_text("Usage: /learn {topic}", parse_mode="HTML")
+        await update.message.reply_text(
+            "What trading concept do you want to learn? Examples:\n\n"
+            "/learn RSI\n"
+            "/learn support and resistance\n"
+            "/learn risk reward ratio\n"
+            "/learn what is a liquidity rug\n"
+            "/learn how to read volume spikes",
+            parse_mode="HTML",
+        )
         return
     topic = " ".join(context.args).strip()
     state = context.application.bot_data.get("state")
@@ -1822,11 +1854,72 @@ async def cmd_status_live(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not update.message:
         return
     state = context.application.bot_data.get("state")
-    live = await fetch_live_market_data(context.application, state)
-    # Build a clean status block from direct live fetch string.
-    # This is intentionally on-demand so it never depends on cache.
-    text = f"📡 LIVE STATUS\n{live}"
-    await update.message.reply_text(escape_for_html(text), parse_mode="HTML", disable_web_page_preview=True)
+
+    httpx_client = httpx.AsyncClient()
+    try:
+        binance_prices = await fetch_live_binance_24h(httpx_client, list(CRYPTO_TRACKED.keys()))
+        yf_prices = await fetch_live_yf_prices(["SPY", "QQQ", "UUP", "GLD", "USO", "GC=F", "CL=F", "SI=F", "^VIX"])
+        fng = await fetch_fear_greed(httpx_client, state)
+        fng_val, fng_label = fmt_fng(fng)
+    finally:
+        await httpx_client.aclose()
+
+    sgt_now = now_utc().astimezone(timezone(timedelta(hours=8))).strftime("%H:%M SGT")
+
+    def row(name: str, price: Optional[float], pct: Optional[float], decimals: int = 2, wide: bool = False) -> str:
+        if price is None:
+            return f"  {name:<8} N/A"
+        sign = "+" if (pct or 0) >= 0 else ""
+        arrow = "▲" if (pct or 0) >= 0 else "▼"
+        price_str = f"${price:,.{decimals}f}"
+        pct_str = f"{sign}{pct:.1f}%" if pct is not None else ""
+        return f"  {name:<8} {price_str:<14} {arrow} {pct_str}"
+
+    btc   = binance_prices.get("BTCUSDT", {})
+    eth   = binance_prices.get("ETHUSDT", {})
+    sol   = binance_prices.get("SOLUSDT", {})
+    mnt   = binance_prices.get("MNTUSDT", {})
+    spy   = yf_prices.get("SPY", {})
+    qqq   = yf_prices.get("QQQ", {})
+    vix   = yf_prices.get("^VIX", {})
+    dxy   = yf_prices.get("UUP", {})
+    gold  = yf_prices.get("GLD", {})
+    oil   = yf_prices.get("USO", {})
+    gc    = yf_prices.get("GC=F", {})
+    cl    = yf_prices.get("CL=F", {})
+    si    = yf_prices.get("SI=F", {})
+
+    mkt_tag = lambda d: " [OPEN]" if d.get("market_open") else " [CLOSED]"
+
+    lines = [
+        f"📡 LIVE STATUS — {sgt_now}",
+        "━━━━━━━━━━━━━━━━━━━━━━━",
+        "",
+        "🪙 CRYPTO",
+        row("BTC",  btc.get("last"),  btc.get("pct"),  0),
+        row("ETH",  eth.get("last"),  eth.get("pct"),  0),
+        row("SOL",  sol.get("last"),  sol.get("pct"),  2),
+        row("MNT",  mnt.get("last"),  mnt.get("pct"),  4),
+        "",
+        "📈 US MARKETS",
+        row("S&P500", spy.get("last"), spy.get("pct"), 0) + mkt_tag(spy),
+        row("Nasdaq", qqq.get("last"), qqq.get("pct"), 0) + mkt_tag(qqq),
+        row("VIX",    vix.get("last"), vix.get("pct"), 2),
+        row("DXY",    dxy.get("last"), dxy.get("pct"), 2),
+        "",
+        "🥇 COMMODITIES",
+        row("Gold",   gc.get("last")  or gold.get("last"),  gc.get("pct")  or gold.get("pct"),  0),
+        row("Oil",    cl.get("last")  or oil.get("last"),   cl.get("pct")  or oil.get("pct"),   2),
+        row("Silver", si.get("last"),  si.get("pct"),  2),
+        "",
+        f"😱 Fear & Greed: {fng_val}/100 — {fng_label}",
+    ]
+
+    await update.message.reply_text(
+        escape_for_html("\n".join(lines)),
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
 
 
 async def prefetch_initial_prices(app: Application, bot_impl_module: Any, state: Any) -> None:
@@ -2336,6 +2429,134 @@ async def cmd_reject(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     )
 
 
+async def cmd_alert(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/alert BTC 100000 — fire once when price crosses that level."""
+    if not update.message:
+        return
+    if len(context.args) != 2:
+        await update.message.reply_text(
+            "Set a price target alert. Examples:\n\n"
+            "/alert BTC 100000\n"
+            "/alert ETH 4000\n"
+            "/alert MNT 1.50\n\n"
+            "Fires once when price crosses the target (up or down).",
+            parse_mode="HTML",
+        )
+        return
+    sym = context.args[0].strip().upper()
+    try:
+        target_price = float(context.args[1].replace(",", ""))
+    except ValueError:
+        await update.message.reply_text("Invalid price. Example: /alert BTC 100000", parse_mode="HTML")
+        return
+
+    ai_manager: Optional[AiManager] = context.application.bot_data.get("ai_manager")
+    if not ai_manager:
+        return
+    alerts = ai_manager.memory.setdefault("price_alerts", [])
+    alerts.append({
+        "symbol": sym,
+        "target": target_price,
+        "created_at": now_utc().isoformat(),
+        "fired": False,
+    })
+    ai_manager.memory["price_alerts"] = alerts[-20:]  # cap at 20
+    ai_manager.persist()
+    await update.message.reply_text(
+        f"🔔 Alert set: {sym} @ ${target_price:,.4f}\n"
+        f"I'll notify you when price crosses this level.\n"
+        f"View all alerts: /alerts",
+        parse_mode="HTML",
+    )
+
+
+async def cmd_alerts_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/alerts — show all active price target alerts."""
+    if not update.message:
+        return
+    ai_manager: Optional[AiManager] = context.application.bot_data.get("ai_manager")
+    if not ai_manager:
+        return
+    alerts = [a for a in ai_manager.memory.get("price_alerts", []) if not a.get("fired")]
+    if not alerts:
+        await update.message.reply_text("No active alerts. Set one with /alert BTC 100000", parse_mode="HTML")
+        return
+    lines = ["🔔 ACTIVE PRICE ALERTS"]
+    for i, a in enumerate(alerts, 1):
+        lines.append(f"[{i}] {a['symbol']} → ${float(a['target']):,.4f}")
+    lines.append("\nRemove one with /cancelalert 1")
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+async def cmd_cancel_alert(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/cancelalert N — cancel the Nth price alert."""
+    if not update.message:
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /cancelalert 1  (use /alerts to see the list)", parse_mode="HTML")
+        return
+    try:
+        idx = int(context.args[0]) - 1
+    except ValueError:
+        await update.message.reply_text("Usage: /cancelalert 1", parse_mode="HTML")
+        return
+    ai_manager: Optional[AiManager] = context.application.bot_data.get("ai_manager")
+    if not ai_manager:
+        return
+    active = [a for a in ai_manager.memory.get("price_alerts", []) if not a.get("fired")]
+    if idx < 0 or idx >= len(active):
+        await update.message.reply_text("Invalid number. Use /alerts to see the list.", parse_mode="HTML")
+        return
+    active[idx]["fired"] = True  # mark as cancelled
+    ai_manager.persist()
+    await update.message.reply_text(
+        f"✅ Alert for {active[idx]['symbol']} @ ${float(active[idx]['target']):,.4f} cancelled.",
+        parse_mode="HTML",
+    )
+
+
+async def price_alerts_check_task(app: Application) -> None:
+    """Background task: checks custom price alerts every 5 minutes."""
+    while True:
+        await asyncio.sleep(300)
+        ai_manager: Optional[AiManager] = app.bot_data.get("ai_manager")
+        chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
+        if not ai_manager or not chat_id:
+            continue
+        alerts = ai_manager.memory.get("price_alerts", [])
+        changed = False
+        httpx_client = httpx.AsyncClient()
+        try:
+            for a in alerts:
+                if a.get("fired"):
+                    continue
+                sym = str(a.get("symbol", "")).upper()
+                target = float(a.get("target", 0))
+                pair = CRYPTO_KEYS_BY_INPUT.get(sym)
+                if not pair:
+                    continue
+                try:
+                    data = await fetch_live_binance_24h(httpx_client, [pair])
+                    current = data.get(pair, {}).get("last")
+                    if current is None:
+                        continue
+                    # Fire if price crossed the target in either direction
+                    if abs(current - target) / target <= 0.005 or \
+                       (current >= target) != (target > current):
+                        a["fired"] = True
+                        changed = True
+                        await app.bot.send_message(
+                            chat_id=chat_id,
+                            text=f"🔔 PRICE ALERT TRIGGERED\n{sym} is now ${current:,.4f}\nYour target: ${target:,.4f}",
+                        )
+                except Exception:
+                    pass
+        finally:
+            await httpx_client.aclose()
+        if changed:
+            ai_manager.persist()
+
+
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show all available commands."""
     if not update.message:
@@ -2366,6 +2587,10 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/resetconfig RSI_HIGH — Revert an override\n\n"
         "💬 FREE CHAT\n"
         "Just type anything — GPT responds with macro context\n\n"
+        "🔔 PRICE ALERTS\n"
+        "/alert BTC 100000 — Notify when BTC hits $100k\n"
+        "/alerts — View all active alerts\n"
+        "/cancelalert 1 — Cancel alert #1\n\n"
         "⏰ AUTO DIGESTS\n"
         "8:00 AM SGT — Morning brief\n"
         "8:00 PM SGT — Evening brief\n"
@@ -2434,6 +2659,9 @@ def run_ai_bot() -> None:
     app.add_handler(CommandHandler("approve", cmd_approve))
     app.add_handler(CommandHandler("reject", cmd_reject))
     app.add_handler(CommandHandler("resetconfig", cmd_resetconfig))
+    app.add_handler(CommandHandler("alert", cmd_alert))
+    app.add_handler(CommandHandler("alerts", cmd_alerts_list))
+    app.add_handler(CommandHandler("cancelalert", cmd_cancel_alert))
     app.add_handler(CommandHandler("help", cmd_help))
 
     # Free chat: any non-command text goes to GPT.
@@ -2445,22 +2673,24 @@ def run_ai_bot() -> None:
         from telegram import BotCommand
         await a.bot.set_my_commands([
             BotCommand("help",           "Show all commands"),
-            BotCommand("status",         "Live prices — crypto + stocks"),
-            BotCommand("review",         "Market regime + Bottom Line"),
-            BotCommand("analyse",        "Full setup analysis — /analyse BTC"),
-            BotCommand("levels",         "Support & resistance — /levels BTC"),
-            BotCommand("ask",            "Any market question — /ask {question}"),
-            BotCommand("scenario",       "What-if macro — /scenario {situation}"),
-            BotCommand("learn",          "Explain a concept — /learn RSI"),
-            BotCommand("portfolio",      "P&L snapshot"),
-            BotCommand("addposition",    "Log a trade — /addposition BTC 0.01 65000"),
+            BotCommand("status",         "Live prices — crypto, stocks, commodities"),
+            BotCommand("review",         "Market regime + summary + Bottom Line"),
+            BotCommand("analyse",        "Full trade setup with entry/target/stop/R:R"),
+            BotCommand("levels",         "Support & resistance levels for a symbol"),
+            BotCommand("ask",            "Ask any market question"),
+            BotCommand("scenario",       "What-if macro scenario thinking"),
+            BotCommand("learn",          "Explain any trading concept"),
+            BotCommand("portfolio",      "View P&L snapshot of your positions"),
+            BotCommand("addposition",    "Log a trade entry"),
             BotCommand("removeposition", "Remove a position"),
-            BotCommand("setbudget",      "Set total budget — /setbudget 5000"),
-            BotCommand("addsetup",       "Track a setup — /addsetup BTC LONG 95000 105000 89000"),
-            BotCommand("config",         "Show active thresholds"),
-            BotCommand("approve",        "Apply optimizer rec — /approve 1"),
-            BotCommand("reject",         "Dismiss optimizer rec — /reject 1"),
-            BotCommand("resetconfig",    "Revert an override — /resetconfig RSI_HIGH"),
+            BotCommand("setbudget",      "Set your total trading budget"),
+            BotCommand("addsetup",       "Track a trade setup with entry/target/stop"),
+            BotCommand("alert",          "Set a price target alert for any token"),
+            BotCommand("alerts",         "View all active price alerts"),
+            BotCommand("cancelalert",    "Cancel a price alert"),
+            BotCommand("config",         "Show active bot thresholds"),
+            BotCommand("approve",        "Apply an optimizer recommendation"),
+            BotCommand("reject",         "Dismiss an optimizer recommendation"),
         ])
         # Prime prices first so cache-backed modules/commands are ready.
         await prefetch_initial_prices(a, bot_impl, state)
@@ -2471,6 +2701,7 @@ def run_ai_bot() -> None:
             asyncio.create_task(portfolio_alerts_task(a), name="portfolio_alerts_task"),
             asyncio.create_task(daily_open_setups_task(a), name="daily_open_setups_task"),
             asyncio.create_task(weekly_optimizer_task(a), name="weekly_optimizer_task"),
+            asyncio.create_task(price_alerts_check_task(a), name="price_alerts_check_task"),
         ]
         a.bot_data["ai_extra_tasks"] = extra_tasks
 
