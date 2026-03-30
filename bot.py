@@ -2340,4 +2340,12 @@ def run_ai_bot() -> None:
 
 
 if __name__ == "__main__":
-    run_ai_bot()
+    import time
+    while True:
+        try:
+            run_ai_bot()
+        except SystemExit:
+            raise  # config errors should still exit
+        except Exception as exc:
+            log_err(f"bot crashed: {exc} — restarting in 10s")
+            time.sleep(10)
