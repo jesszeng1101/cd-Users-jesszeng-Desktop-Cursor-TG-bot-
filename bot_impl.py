@@ -151,19 +151,14 @@ class TTLCache:
 
 
 HIGH_IMPACT_KEYWORDS = [
-    "SEC",
-    "ETF",
-    "hack",
-    "exploit",
-    "listing",
-    "delisting",
-    "Fed",
-    "CPI",
-    "BlackRock",
-    "liquidation",
-    "sanctions",
-    "partnership",
-    "ban",
+    # Crypto-native
+    "SEC", "ETF", "hack", "exploit", "listing", "delisting",
+    "BlackRock", "liquidation", "sanctions", "partnership", "ban",
+    # Macro — Fed / rates / inflation
+    "Fed", "FOMC", "Federal Reserve", "rate decision", "rate cut", "rate hike",
+    "CPI", "inflation", "PCE", "NFP", "jobs", "unemployment",
+    "interest rate", "dot plot", "Powell", "hawkish", "dovish",
+    "Treasury", "yield", "DXY", "dollar",
 ]
 
 BINANCE_WS_PAIRS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
@@ -182,7 +177,8 @@ EQUITY_INDICES = {
     "QQQ": "Nasdaq",
     "GLD": "Gold (ETF)",
     "USO": "Oil (ETF)",
-    "UUP": "DXY",
+    "DX-Y.NYB": "DXY",  # Actual DXY index (was UUP ETF proxy which lags)
+    "^TNX": "US10Y",   # 10-year yield — yfinance returns actual % already (e.g. 4.34 = 4.34%)
 }
 
 COMMODITIES = {
@@ -561,6 +557,63 @@ def build_critical_alert_text(
         "\n"
         "📌 Not financial advice. Do your own research."
     )
+
+
+async def fetch_macro_events_today(sgt_date: datetime) -> list[str]:
+    """
+    Fetch high-impact USD macro events for today from Finnhub.
+    Returns list of plain-text strings ready for the digest.
+    Requires FINNHUB_API_KEY env var — silently returns [] if not set.
+    """
+    api_key = os.getenv("FINNHUB_API_KEY", "").strip()
+    if not api_key:
+        return []
+    date_str = sgt_date.strftime("%Y-%m-%d")
+    try:
+        async with httpx.AsyncClient() as c:
+            r = await c.get(
+                "https://finnhub.io/api/v1/calendar/economic",
+                params={"from": date_str, "to": date_str, "token": api_key},
+                timeout=10.0,
+            )
+            r.raise_for_status()
+            events = (r.json() or {}).get("economicCalendar") or []
+    except Exception:
+        return []
+
+    HIGH_IMPACT = {"high"}
+    USD_EVENTS = {"CPI", "FOMC", "NFP", "PCE", "PPI", "Nonfarm", "Federal Funds",
+                  "Interest Rate", "Unemployment", "GDP", "Retail Sales"}
+
+    lines = []
+    for ev in events:
+        if str(ev.get("impact", "")).lower() not in HIGH_IMPACT:
+            continue
+        if ev.get("country", "").upper() != "US":
+            continue
+        name = ev.get("event", "")
+        if not any(k.lower() in name.lower() for k in USD_EVENTS):
+            continue
+        actual = ev.get("actual")
+        estimate = ev.get("estimate")
+        prev = ev.get("prev")
+        time_str = ev.get("time", "")
+
+        if actual is not None:
+            # Already released — show surprise
+            try:
+                diff = float(actual) - float(estimate) if estimate is not None else 0
+                tone = "above est" if diff > 0 else ("below est" if diff < 0 else "in-line")
+                lines.append(f"  ⚡ {name}: {actual} ({tone}, est {estimate})")
+            except Exception:
+                lines.append(f"  ⚡ {name}: {actual}")
+        else:
+            # Upcoming — warn to reduce leverage
+            est_str = f", est {estimate}" if estimate is not None else ""
+            time_label = f" at {time_str}" if time_str else ""
+            lines.append(f"  ⏰ {name}{time_label}{est_str} — reduce leverage before print")
+
+    return lines
 
 
 async def fetch_funding_rate(symbol: str) -> Optional[float]:
@@ -1249,6 +1302,10 @@ async def news_monitor(app: Application, state: BotState, client: httpx.AsyncCli
                 "https://www.coindesk.com/arc/outboundfeeds/rss/",
                 "https://cointelegraph.com/rss",
                 "https://feeds.feedburner.com/CoinDesk",
+                # Macro feeds — FOMC statements, Fed speeches, macro-crypto intersection
+                "https://www.federalreserve.gov/feeds/press_monetary.xml",
+                "https://www.federalreserve.gov/feeds/speeches.xml",
+                "https://blockworks.co/feed",
             ]
             for feed_url in rss_urls:
                 resp = await client.get(feed_url, timeout=25.0, follow_redirects=True)
@@ -1409,13 +1466,24 @@ async def daily_briefing_task(app: Application, state: BotState, client: httpx.A
             qq_price, qq_move = market_move("QQQ")
             gld_price, gld_move = market_move("GLD")
             uso_price, uso_move = market_move("USO")
-            uup_price, uup_move = market_move("UUP")
+            uup_price, uup_move = market_move("DX-Y.NYB")
+
+            tnx_price, tnx_move = market_move("^TNX")
+            # ^TNX is yield*10 — convert display to actual yield %
+            tnx_snap = state.market_snapshots.get("^TNX")
+            if tnx_snap and tnx_snap.price:
+                tnx_display = f"{float(tnx_snap.price):.2f}%"
+            else:
+                tnx_display = "N/A"
 
             markets_line = (
                 f"  S&P 500  {spx_move}  |  Nasdaq {qq_move}\n"
                 f"  Gold     {gld_move}  |  Oil    {uso_move}\n"
-                f"  DXY      {uup_move}"
+                f"  DXY      {uup_move}  |  US10Y  {tnx_display}"
             )
+
+            # Macro calendar events for today
+            macro_events = await fetch_macro_events_today(now_sgt)
 
             # Overnight news: last 12h with >=2 keyword matches
             overnight_start = now_sgt - timedelta(hours=12)
@@ -1481,15 +1549,14 @@ async def daily_briefing_task(app: Application, state: BotState, client: httpx.A
                 + "\n".join(crypto_lines)
                 + "\n"
                 "📈 MARKETS\n"
-                + f"  S&P 500  {spx_move}  |  Nasdaq {qq_move}\n"
-                + f"  Gold     {gld_move}  |  Oil    {uso_move}\n"
-                + f"  DXY      {uup_move}\n"
+                + markets_line + "\n"
                 "\n"
                 "😨 SENTIMENT\n"
                 + f"Fear &amp; Greed: {fng_value} — {escape_html(fng_label)}\n"
                 + f"{escape_html(sentiment_meaning(fng_value))}\n"
                 "\n"
-                "🗞 OVERNIGHT NEWS\n"
+                + ("🗓 MACRO EVENTS TODAY\n" + "\n".join(macro_events) + "\n\n" if macro_events else "")
+                + "🗞 OVERNIGHT NEWS\n"
                 + (overnight_news_block + "\n" if overnight_news_block else "")
                 + "\n"
                 "🎯 TODAY'S FOCUS\n"

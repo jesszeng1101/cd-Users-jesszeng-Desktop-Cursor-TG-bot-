@@ -797,11 +797,11 @@ STOCK_KEYS_BY_INPUT = {
     "QQQ": "QQQ",
     "GLD": "GLD",
     "USO": "USO",
-    "UUP": "UUP",
+    "DX-Y.NYB": "DXY",
     "VIX": "^VIX",
     "GOLD": "GLD",
     "OIL": "USO",
-    "DXY": "UUP",
+    "DXY": "DX-Y.NYB",
 }
 
 COMMOD_KEYS_BY_INPUT = {
@@ -1272,7 +1272,7 @@ async def fetch_live_market_data(application: Application, state: Any) -> str:
         crypto_symbols_24h = list(CRYPTO_TRACKED.keys())
         crypto_prices_24h = await fetch_live_crypto_24h(httpx_client, crypto_symbols_24h)
 
-        yf_tickers = ["SPY", "QQQ", "UUP", "GLD", "USO", "GC=F", "CL=F", "SI=F", "^VIX"]
+        yf_tickers = ["SPY", "QQQ", "DX-Y.NYB", "^TNX", "GLD", "USO", "GC=F", "CL=F", "SI=F", "^VIX"]
         yf_prices = await fetch_live_yf_prices(yf_tickers)
 
         fng = await fetch_fear_greed(httpx_client, state)
@@ -1301,9 +1301,9 @@ async def fetch_live_market_data(application: Application, state: Any) -> str:
         qqq = yf_prices.get("QQQ", {}).get("last")
         qqq_pct = yf_prices.get("QQQ", {}).get("pct")
         qqq_open = bool(yf_prices.get("QQQ", {}).get("market_open", False))
-        dxy = yf_prices.get("UUP", {}).get("last")
-        dxy_pct = yf_prices.get("UUP", {}).get("pct")
-        dxy_open = bool(yf_prices.get("UUP", {}).get("market_open", False))
+        dxy = yf_prices.get("DX-Y.NYB", {}).get("last")
+        dxy_pct = yf_prices.get("DX-Y.NYB", {}).get("pct")
+        dxy_open = bool(yf_prices.get("DX-Y.NYB", {}).get("market_open", False))
 
         gold = yf_prices.get("GLD", {}).get("last")
         gold_pct = yf_prices.get("GLD", {}).get("pct")
@@ -1961,7 +1961,7 @@ async def cmd_status_live(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             if px is not None:
                 crypto_prices_24h["MNTUSDT"] = {"last": float(px), "pct": None}
 
-        yf_prices = await fetch_live_yf_prices(["SPY", "QQQ", "UUP", "GLD", "USO", "GC=F", "CL=F", "SI=F", "^VIX"])
+        yf_prices = await fetch_live_yf_prices(["SPY", "QQQ", "DX-Y.NYB", "^TNX", "GLD", "USO", "GC=F", "CL=F", "SI=F", "^VIX"])
         fng = await fetch_fear_greed(httpx_client, state)
         fng_val, fng_label = fmt_fng(fng)
     except Exception:
@@ -1989,7 +1989,8 @@ async def cmd_status_live(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     spy   = yf_prices.get("SPY", {})
     qqq   = yf_prices.get("QQQ", {})
     vix   = yf_prices.get("^VIX", {})
-    dxy   = yf_prices.get("UUP", {})
+    dxy   = yf_prices.get("DX-Y.NYB", {})
+    tnx   = yf_prices.get("^TNX", {})
     gold  = yf_prices.get("GLD", {})
     oil   = yf_prices.get("USO", {})
     gc    = yf_prices.get("GC=F", {})
@@ -2013,6 +2014,7 @@ async def cmd_status_live(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         row("Nasdaq", qqq.get("last"), qqq.get("pct"), 0) + mkt_tag(qqq),
         row("VIX",    vix.get("last"), vix.get("pct"), 2),
         row("DXY",    dxy.get("last"), dxy.get("pct"), 2),
+        row("US10Y",  tnx.get("last"), tnx.get("pct"), 2),
         "",
         "🥇 COMMODITIES",
         row("Gold",   gc.get("last")  or gold.get("last"),  gc.get("pct")  or gold.get("pct"),  0),
@@ -2051,7 +2053,7 @@ async def prefetch_initial_prices(app: Application, bot_impl_module: Any, state:
                 snap.confidence = snap.confidence if hasattr(snap, "confidence") else None
                 state.crypto_snapshots[pair] = snap
 
-        yf_tickers = ["SPY", "QQQ", "UUP", "GLD", "USO", "GC=F", "CL=F", "SI=F", "^VIX"]
+        yf_tickers = ["SPY", "QQQ", "DX-Y.NYB", "^TNX", "GLD", "USO", "GC=F", "CL=F", "SI=F", "^VIX"]
         yf_data = await fetch_live_yf_prices(yf_tickers)
         if hasattr(state, "market_snapshots"):
             for ticker, payload in yf_data.items():
