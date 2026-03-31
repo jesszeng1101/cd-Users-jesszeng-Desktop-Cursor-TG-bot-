@@ -1118,6 +1118,24 @@ async def fetch_live_binance_24h(httpx_client: httpx.AsyncClient, symbols: list[
     return by_symbol
 
 
+async def fetch_bybit_klines(client: httpx.AsyncClient, symbol: str, bybit_interval: str, limit: int) -> list[list[Any]]:
+    """
+    Fetch OHLCV klines from Bybit v5.
+    bybit_interval: '60' = 1h, '15' = 15m, 'D' = daily, etc.
+    Returns list in oldest-first order with same index layout as Binance klines:
+    [time, open, high, low, close, volume, ...]
+    """
+    r = await client.get(
+        "https://api.bybit.com/v5/market/kline",
+        params={"category": "spot", "symbol": symbol, "interval": bybit_interval, "limit": limit},
+        timeout=25.0,
+    )
+    r.raise_for_status()
+    rows = ((r.json().get("result") or {}).get("list") or [])
+    # Bybit returns newest-first; reverse so index 0 = oldest (same as Binance)
+    return list(reversed(rows))
+
+
 async def fetch_live_bybit_24h(symbols: list[str]) -> dict[str, dict[str, float]]:
     """
     Fetch Bybit spot ticker as fallback for pairs not available on Binance.
@@ -1562,13 +1580,23 @@ async def cmd_analyse(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         trend7: Optional[float] = None
 
         if is_crypto:
-            binance = await fetch_live_crypto_24h(httpx_client, [crypto_pair])
-            last = binance.get(crypto_pair, {}).get("last")
-            pct24 = binance.get(crypto_pair, {}).get("pct")
+            price_data = await fetch_live_crypto_24h(httpx_client, [crypto_pair])
+            last = price_data.get(crypto_pair, {}).get("last")
+            pct24 = price_data.get(crypto_pair, {}).get("pct")
 
-            klines = await fetch_klines(httpx_client, crypto_pair, "1h", 200)
-            closes = [float(k[4]) for k in klines if len(k) > 4]
-            volumes = [float(k[5]) for k in klines if len(k) > 5]
+            # Bybit-only symbols (e.g. MNT) don't have klines on Binance — use Bybit.
+            try:
+                if crypto_pair in BYBIT_ONLY_SYMBOLS:
+                    klines = await fetch_bybit_klines(httpx_client, crypto_pair, "60", 200)
+                else:
+                    klines = await fetch_klines(httpx_client, crypto_pair, "1h", 200)
+                closes = [float(k[4]) for k in klines if len(k) > 4]
+                volumes = [float(k[5]) for k in klines if len(k) > 5]
+            except Exception as exc:
+                log_err(f"klines fetch failed for {crypto_pair}: {exc}")
+                closes = []
+                volumes = []
+
             rsi = compute_rsi(closes, 14) if closes else None
 
             if len(closes) >= 169:
