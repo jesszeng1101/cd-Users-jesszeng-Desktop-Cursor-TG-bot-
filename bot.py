@@ -1724,7 +1724,10 @@ async def cmd_analyse(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
     except Exception as exc:
         log_err(f"/analyse error: {exc}")
-        await update.message.reply_text("AI unavailable right now, try again in a minute", parse_mode="HTML")
+        await update.message.reply_text(
+            f"❌ /analyse failed: {html.escape(str(exc)[:200])}",
+            parse_mode="HTML",
+        )
     finally:
         if created_temp and httpx_client is not None:
             await httpx_client.aclose()
@@ -2763,6 +2766,7 @@ def run_ai_bot() -> None:
 
     # AI manager stored in app.bot_data for handlers.
     ai_key = os.getenv("OPENAI_API_KEY", "").strip()
+    log.info(f"OpenAI key loaded: {'YES (len=%d)' % len(ai_key) if ai_key else 'NO — AI commands will not work'}")
     app.bot_data["ai_manager"] = AiManager(ai_key)
 
     # Skills layer
