@@ -166,13 +166,13 @@ HIGH_IMPACT_KEYWORDS = [
     "ban",
 ]
 
-BINANCE_WS_PAIRS = ["BTCUSDT", "ETHUSDT", "AVAXUSDT"]
+BINANCE_WS_PAIRS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 EXTERNAL_CRYPTO_PAIRS = ["MNTUSDT"]
 CRYPTO_PAIRS = BINANCE_WS_PAIRS + EXTERNAL_CRYPTO_PAIRS
 CRYPTO_DISPLAY = {
     "BTCUSDT": "BTC",
     "ETHUSDT": "ETH",
-    "AVAXUSDT": "AVAX",
+    "SOLUSDT": "SOL",
     "MNTUSDT": "MNT",
 }
 
@@ -542,14 +542,12 @@ def build_critical_alert_text(
 def choose_crypto_related_assets(asset_key: str) -> str:
     # Simple beginner-friendly correlations.
     if asset_key == "BTCUSDT":
-        return "ETH, SOL, BNB"
+        return "ETH, SOL, MNT"
     if asset_key == "ETHUSDT":
-        return "BTC, SOL, AVAX"
+        return "BTC, SOL, MNT"
     if asset_key == "SOLUSDT":
-        return "BTC, ETH, AVAX"
-    if asset_key == "BNBUSDT":
-        return "BTC, ETH, AVAX"
-    if asset_key == "AVAXUSDT":
+        return "BTC, ETH, MNT"
+    if asset_key == "MNTUSDT":
         return "BTC, ETH, SOL"
     return "BTC, ETH, SOL"
 
@@ -809,7 +807,50 @@ async def crypto_price_monitor(app: Application, state: BotState, client: httpx.
                         log_err(f"crypto WS message error: {exc}")
         except Exception as exc:
             log_err(f"crypto monitor error: {exc}")
+            # If Binance WS is geo-blocked (451 / connection refused), fall back to
+            # Bybit polling for the same pairs so alerts still fire on Railway.
+            if "451" in str(exc) or "403" in str(exc) or "ConnectionRefused" in str(exc) or "refused" in str(exc).lower():
+                log_err("Binance WS blocked — switching to Bybit polling for BTC/ETH/SOL")
+                try:
+                    await _bybit_poll_fallback(app, state)
+                except Exception as poll_exc:
+                    log_err(f"Bybit poll fallback error: {poll_exc}")
             await asyncio.sleep(SECONDS_1_MIN)
+
+
+async def _bybit_poll_fallback(app: Application, state: BotState) -> None:
+    """Poll Bybit every 15 min for BTC/ETH/SOL when Binance WS is unavailable."""
+    while not state.stop_event.is_set():
+        for pair in BINANCE_WS_PAIRS:
+            try:
+                kl_15 = await fetch_bybit_klines(pair, "15", limit=200)
+                if len(kl_15) < 30:
+                    continue
+                last = kl_15[-1]
+                open_p, close_p, vol = float(last[1]), float(last[4]), float(last[5])
+                if open_p <= 0:
+                    continue
+                move_pct = ((close_p - open_p) / open_p) * 100.0
+                vols = [float(r[5]) for r in kl_15[:-1]]
+                avg_vol = (sum(vols) / len(vols)) if vols else 0.0
+                volume_ratio = (vol / avg_vol) if avg_vol > 0 else 0.0
+                kl_60 = await fetch_bybit_klines(pair, "60", limit=200)
+                closes_1h = [float(r[4]) for r in kl_60]
+                rsi = compute_rsi(closes_1h, RSI_PERIOD)
+
+                snap = state.crypto_snapshots.get(pair) or MarketSnapshot()
+                snap.price = close_p
+                snap.move_pct = move_pct
+                snap.rsi = rsi
+                snap.volume_ratio = volume_ratio
+                snap.rsi_state = rsi_state_label(rsi)
+                now = now_utc()
+                confidence = compute_confidence(state, move_pct, rsi, volume_ratio, now)
+                snap.confidence = confidence
+                state.crypto_snapshots[pair] = snap
+            except Exception as exc:
+                log_err(f"Bybit poll fallback {pair}: {exc}")
+        await asyncio.sleep(SECONDS_15_MIN)
 
 
 async def external_crypto_monitor(app: Application, state: BotState) -> None:

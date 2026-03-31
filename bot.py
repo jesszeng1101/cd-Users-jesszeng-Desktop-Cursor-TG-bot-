@@ -786,7 +786,7 @@ class AiManager:
 CRYPTO_TRACKED = {
     "BTCUSDT": "BTC",
     "ETHUSDT": "ETH",
-    "AVAXUSDT": "AVAX",
+    "SOLUSDT": "SOL",
     "MNTUSDT": "MNT",
 }
 CRYPTO_KEYS_BY_INPUT = {**{v: k for k, v in CRYPTO_TRACKED.items()}, **{k: k for k in CRYPTO_TRACKED.keys()}}
@@ -1290,8 +1290,8 @@ async def fetch_live_market_data(application: Application, state: Any) -> str:
         btc_pct = crypto_prices_24h.get("BTCUSDT", {}).get("pct")
         eth = crypto_prices_24h.get("ETHUSDT", {}).get("last")
         eth_pct = crypto_prices_24h.get("ETHUSDT", {}).get("pct")
-        avax = crypto_prices_24h.get("AVAXUSDT", {}).get("last")
-        avax_pct = crypto_prices_24h.get("AVAXUSDT", {}).get("pct")
+        sol = crypto_prices_24h.get("SOLUSDT", {}).get("last")
+        sol_pct = crypto_prices_24h.get("SOLUSDT", {}).get("pct")
         mnt = crypto_prices_24h.get("MNTUSDT", {}).get("last")
         mnt_pct = crypto_prices_24h.get("MNTUSDT", {}).get("pct")
 
@@ -1321,7 +1321,7 @@ async def fetch_live_market_data(application: Application, state: Any) -> str:
         parts = [
             seg("BTC", btc, btc_pct),
             seg("ETH", eth, eth_pct),
-            seg("AVAX", avax, avax_pct),
+            seg("SOL", sol, sol_pct),
             seg("MNT", mnt, mnt_pct),
             seg("SPY", spx, spx_pct, spx_open, is_index=True),
             seg("QQQ", qqq, qqq_pct, qqq_open, is_index=True),
@@ -1548,7 +1548,7 @@ async def cmd_analyse(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "Tap one to send:\n"
             "/analyse BTC\n"
             "/analyse ETH\n"
-            "/analyse AVAX\n"
+            "/analyse SOL\n"
             "/analyse MNT\n"
             "/analyse Gold\n"
             "/analyse SPY\n\n"
@@ -1576,7 +1576,7 @@ async def cmd_analyse(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             ticker_for_yf = commod_ticker
             display_name = commod_ticker
         else:
-            await update.message.reply_text("Unknown symbol. Try BTC, ETH, AVAX, MNT, SPY, QQQ, Gold, Oil.", parse_mode="HTML")
+            await update.message.reply_text("Unknown symbol. Try BTC, ETH, SOL, MNT, SPY, QQQ, Gold, Oil.", parse_mode="HTML")
             return
 
     httpx_client: Optional[httpx.AsyncClient] = context.application.bot_data.get("httpx_client")
@@ -1903,7 +1903,7 @@ async def cmd_levels(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         yf_ticker = STOCK_KEYS_BY_INPUT.get(sym) or COMMOD_KEYS_BY_INPUT.get(sym)
         if not yf_ticker:
             await update.message.reply_text(
-                "Unknown symbol. Try: BTC ETH AVAX MNT SPY QQQ Gold Oil DXY",
+                "Unknown symbol. Try: BTC ETH SOL MNT SPY QQQ Gold Oil DXY",
                 parse_mode="HTML",
             )
             return
@@ -1951,8 +1951,8 @@ async def cmd_status_live(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     httpx_client = httpx.AsyncClient()
     try:
-        # Status is explicit: BTC, ETH, MNT
-        crypto_symbols_24h = ["BTCUSDT", "ETHUSDT", "MNTUSDT"]
+        # Status is explicit: BTC, ETH, SOL, MNT
+        crypto_symbols_24h = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "MNTUSDT"]
         crypto_prices_24h = await fetch_live_crypto_24h(httpx_client, crypto_symbols_24h)
 
         # Final fallback for MNT if exchange tickers fail.
@@ -1984,6 +1984,7 @@ async def cmd_status_live(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     btc = crypto_prices_24h.get("BTCUSDT", {})
     eth = crypto_prices_24h.get("ETHUSDT", {})
+    sol = crypto_prices_24h.get("SOLUSDT", {})
     mnt = crypto_prices_24h.get("MNTUSDT", {})
     spy   = yf_prices.get("SPY", {})
     qqq   = yf_prices.get("QQQ", {})
@@ -2004,7 +2005,8 @@ async def cmd_status_live(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         "🪙 CRYPTO",
         row("BTC",  btc.get("last"),  btc.get("pct"),  0),
         row("ETH",  eth.get("last"),  eth.get("pct"),  0),
-        row("MNT",  mnt.get("last"),  mnt.get("pct"), 4),
+        row("SOL",  sol.get("last"),  sol.get("pct"),  2),
+        row("MNT",  mnt.get("last"),  mnt.get("pct"),  4),
         "",
         "📈 US MARKETS",
         row("S&P500", spy.get("last"), spy.get("pct"), 0) + mkt_tag(spy),
@@ -2700,10 +2702,10 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "📖 ALL COMMANDS\n"
         "━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "📊 MARKET INTEL\n"
-        "/status — Live prices (BTC/ETH/AVAX/MNT + stocks)\n"
+        "/status — Live prices (BTC/ETH/SOL/MNT + stocks)\n"
         "/review — Market regime + summary + Bottom Line\n"
         "/analyse BTC — Full setup: Thesis→Entry→Target→Stop→R:R\n"
-        "/levels BTC — Key support & resistance levels (BTC ETH AVAX MNT SPY Gold...)\n"
+        "/levels BTC — Key support & resistance levels (BTC ETH SOL MNT SPY Gold...)\n"
         "/scenario CPI hot — What-if macro scenario\n"
         "/ask {question} — Any market question\n"
         "/learn RSI — Explain any trading concept\n\n"
