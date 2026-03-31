@@ -60,7 +60,13 @@ def escape_html(text: str) -> str:
 def format_usd(x: float) -> str:
     if x is None or not isinstance(x, (int, float)):
         return "N/A"
-    return f"${x:,.0f}"
+    if x >= 1000:
+        return f"${x:,.0f}"
+    if x >= 1:
+        return f"${x:,.2f}"
+    if x >= 0.01:
+        return f"${x:,.4f}"
+    return f"${x:,.6f}"
 
 
 def time_ago(dt: datetime) -> str:
