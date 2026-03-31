@@ -2709,6 +2709,11 @@ async def cmd_resetconfig(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 def run_ai_bot() -> None:
     import bot_impl
 
+    # Explicitly load .env before reading any env vars in this module.
+    # bot_impl.Config.from_env() calls load_dotenv() too, but os.getenv()
+    # calls below (e.g. OPENAI_API_KEY) must see those values as well.
+    load_dotenv()
+
     try:
         config = bot_impl.Config.from_env()
     except Exception as exc:
