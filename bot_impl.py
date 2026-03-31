@@ -409,18 +409,27 @@ def compute_confidence(
     now: datetime,
 ) -> int:
     if move_pct is None or rsi is None or volume_ratio is None:
-        # Still return something, but score won't reach 3 without metrics.
         return 0
 
     score = 0
-    if abs(move_pct) >= state.config.price_move_pct:
-        score += 1
-    if rsi < RSI_OVERSOLD or rsi > RSI_OVERBOUGHT:
-        score += 1
-    if volume_ratio >= VOLUME_SPIKE_MULTIPLIER:
+
+    # 1. Price move is the primary gate — must move to score anything
+    price_moved = abs(move_pct) >= state.config.price_move_pct
+    if price_moved:
         score += 1
 
-    # Sentiment confirms direction
+    # 2. RSI extreme — only counts if there's also a meaningful price move (>= 0.5%)
+    rsi_extreme = rsi < RSI_OVERSOLD or rsi > RSI_OVERBOUGHT
+    if rsi_extreme and abs(move_pct) >= 0.5:
+        score += 1
+
+    # 3. Volume spike — only counts when combined with a real price move (>= 0.5%)
+    #    Volume alone (0.0% move + 2x volume) is noise, not signal
+    vol_spike = volume_ratio >= VOLUME_SPIKE_MULTIPLIER
+    if vol_spike and abs(move_pct) >= 0.5:
+        score += 1
+
+    # 4. Sentiment confirms direction
     if state.fng_value is not None:
         bullish = state.fng_value <= state.config.fear_low
         bearish = state.fng_value >= state.config.greed_high
@@ -429,7 +438,7 @@ def compute_confidence(
         elif move_pct < 0 and bearish:
             score += 1
 
-    # News confirmation (relevant in last 2 hours)
+    # 5. News confirmation (relevant in last 2 hours)
     cutoff = now - timedelta(hours=2)
     if any(ev.ts >= cutoff for ev in state.recent_news):
         score += 1
@@ -507,14 +516,28 @@ def build_critical_alert_text(
     action_reason: str,
     suggested_size_line: Optional[str],
     also_watch: str,
+    funding_context: str = "",
+    ls_context: str = "",
+    btc_dominance: Optional[float] = None,
 ) -> str:
     rsi_label = rsi_state_label(rsi)
     rsi_val = f"{rsi:.1f}" if rsi is not None else "N/A"
     move_sign = "+" if move_pct >= 0 else ""
     suggested_size = suggested_size_line if suggested_size_line else ""
 
+    # Build macro context block — only show lines we have data for
+    macro_lines = []
+    if funding_context:
+        macro_lines.append(f"📉 {escape_html(funding_context)}")
+    if ls_context:
+        macro_lines.append(f"⚖️ {escape_html(ls_context)}")
+    if btc_dominance is not None:
+        dom_note = "rising — alts under pressure" if btc_dominance > 54 else ("falling — alt rotation on" if btc_dominance < 50 else "stable")
+        macro_lines.append(f"₿ BTC dominance: {btc_dominance:.1f}% — {dom_note}")
+    macro_block = ("\n🌐 MACRO CONTEXT\n" + "\n".join(macro_lines) + "\n") if macro_lines else ""
+
     return (
-        "⚡ CRITICAL ALERT\n"
+        "⚡ SIGNAL ALERT\n"
         "━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🪙 Asset: {escape_html(asset_name)}\n"
         f"📍 Price: {format_usd(price)}  |  Move: {move_sign}{move_pct:.1f}% in {escape_html(timeframe)}\n"
@@ -524,12 +547,13 @@ def build_critical_alert_text(
         "\n"
         "🧠 WHAT'S HAPPENING\n"
         f"{escape_html(whats_happening)}\n"
-        "\n"
+        + macro_block
+        + "\n"
         "💼 SUGGESTED ACTION\n"
         f"{escape_html(action)}\n"
         f"→ {escape_html(action_reason)}\n"
         + (
-            f"→ If entering: suggested position size = {escape_html(suggested_size)}\n"
+            f"→ If entering: suggested size = {escape_html(suggested_size)}\n"
             if suggested_size
             else ""
         )
@@ -537,6 +561,84 @@ def build_critical_alert_text(
         "\n"
         "📌 Not financial advice. Do your own research."
     )
+
+
+async def fetch_funding_rate(symbol: str) -> Optional[float]:
+    """Fetch current perpetual funding rate from Bybit. Returns as percentage per 8h."""
+    try:
+        async with httpx.AsyncClient() as c:
+            r = await c.get(
+                "https://api.bybit.com/v5/market/funding/history",
+                params={"category": "linear", "symbol": symbol, "limit": 1},
+                timeout=10.0,
+            )
+            r.raise_for_status()
+            items = ((r.json().get("result") or {}).get("list") or [])
+            if items:
+                return float(items[0].get("fundingRate", 0)) * 100.0  # convert to %
+    except Exception:
+        pass
+    return None
+
+
+async def fetch_long_short_ratio(symbol: str) -> Optional[float]:
+    """Fetch long/short ratio from Bybit. Returns long% (e.g. 58.3 means 58.3% longs)."""
+    try:
+        async with httpx.AsyncClient() as c:
+            r = await c.get(
+                "https://api.bybit.com/v5/market/account-ratio",
+                params={"category": "linear", "symbol": symbol, "period": "1h", "limit": 1},
+                timeout=10.0,
+            )
+            r.raise_for_status()
+            items = ((r.json().get("result") or {}).get("list") or [])
+            if items:
+                buy_ratio = float(items[0].get("buyRatio", 0.5))
+                return buy_ratio * 100.0  # long%
+    except Exception:
+        pass
+    return None
+
+
+async def fetch_btc_dominance() -> Optional[float]:
+    """Fetch BTC market dominance % from CoinGecko. No API key required."""
+    try:
+        async with httpx.AsyncClient() as c:
+            r = await c.get(
+                "https://api.coingecko.com/api/v3/global",
+                timeout=10.0,
+            )
+            r.raise_for_status()
+            pct = (r.json().get("data") or {}).get("market_cap_percentage", {})
+            if "btc" in pct:
+                return float(pct["btc"])
+    except Exception:
+        pass
+    return None
+
+
+def format_funding_context(funding: Optional[float]) -> str:
+    """Turn funding rate into a plain-English signal."""
+    if funding is None:
+        return ""
+    if funding > 0.05:
+        return f"Funding: +{funding:.3f}%/8h — longs overcrowded, squeeze risk"
+    if funding < -0.02:
+        return f"Funding: {funding:.3f}%/8h — shorts crowded, watch for snapback"
+    sign = "+" if funding >= 0 else ""
+    return f"Funding: {sign}{funding:.3f}%/8h — neutral"
+
+
+def format_ls_context(long_pct: Optional[float]) -> str:
+    """Turn long/short ratio into a plain-English bias signal."""
+    if long_pct is None:
+        return ""
+    short_pct = 100.0 - long_pct
+    if long_pct > 65:
+        return f"L/S: {long_pct:.0f}% long — retail leaning heavily long"
+    if long_pct < 35:
+        return f"L/S: {long_pct:.0f}% long — retail leaning heavily short"
+    return f"L/S: {long_pct:.0f}% long / {short_pct:.0f}% short — balanced"
 
 
 def choose_crypto_related_assets(asset_key: str) -> str:
@@ -737,7 +839,7 @@ async def crypto_price_monitor(app: Application, state: BotState, client: httpx.
 
                         whats_happening = (
                             f"{asset_name} moved {move_pct:+.1f}% in the last {timeframe} while volume was {volume_ratio:.1f}× normal. "
-                            f"RSI is {rsi_label.lower()}, which often lines up with momentum extremes (not random noise)."
+                            f"RSI is {rsi_label.lower()}, which often lines up with momentum extremes."
                         )
                         whats_happening = whats_happening[:380]
 
@@ -753,6 +855,17 @@ async def crypto_price_monitor(app: Application, state: BotState, client: httpx.
                         if action == "CONSIDER ENTRY":
                             suggested_size_line = DEFAULT_SUGGESTED_SIZE_TEXT
 
+                        # Fetch macro context — run concurrently, don't block alert on failure
+                        funding, long_pct, btc_dom = await asyncio.gather(
+                            fetch_funding_rate(pair),
+                            fetch_long_short_ratio(pair),
+                            fetch_btc_dominance(),
+                            return_exceptions=True,
+                        )
+                        funding = funding if isinstance(funding, float) else None
+                        long_pct = long_pct if isinstance(long_pct, float) else None
+                        btc_dom = btc_dom if isinstance(btc_dom, float) else None
+
                         text = build_critical_alert_text(
                             asset_name=asset_name,
                             price=close_p,
@@ -766,6 +879,9 @@ async def crypto_price_monitor(app: Application, state: BotState, client: httpx.
                             action_reason=reason,
                             suggested_size_line=suggested_size_line,
                             also_watch=also_watch,
+                            funding_context=format_funding_context(funding),
+                            ls_context=format_ls_context(long_pct),
+                            btc_dominance=btc_dom,
                         )
 
                         # Daily max 3 critical alerts, with top-N replacement via editing.
@@ -903,7 +1019,7 @@ async def external_crypto_monitor(app: Application, state: BotState) -> None:
                 state.candle_alert_dedup.add(candle_key, ttl_seconds=SECONDS_1_HOUR)
 
                 asset_name = CRYPTO_DISPLAY.get(pair, pair)
-                also_watch = "BTC, ETH, AVAX"
+                also_watch = choose_crypto_related_assets(pair)
                 rsi_label = rsi_state_label(rsi)
                 whats_happening = (
                     f"{asset_name} moved {move_pct:+.1f}% in the last 15m while volume was {volume_ratio:.1f}× normal. "
@@ -917,6 +1033,19 @@ async def external_crypto_monitor(app: Application, state: BotState) -> None:
                     sentiment_bearish=state.fng_value is not None and state.fng_value >= state.config.greed_high,
                 )
                 suggested_size_line = DEFAULT_SUGGESTED_SIZE_TEXT if action == "CONSIDER ENTRY" else None
+
+                # Fetch macro context concurrently
+                perp_sym = pair  # Bybit perp uses same symbol (MNTUSDT exists as linear)
+                funding, long_pct, btc_dom = await asyncio.gather(
+                    fetch_funding_rate(perp_sym),
+                    fetch_long_short_ratio(perp_sym),
+                    fetch_btc_dominance(),
+                    return_exceptions=True,
+                )
+                funding = funding if isinstance(funding, float) else None
+                long_pct = long_pct if isinstance(long_pct, float) else None
+                btc_dom = btc_dom if isinstance(btc_dom, float) else None
+
                 text = build_critical_alert_text(
                     asset_name=asset_name,
                     price=close_p,
@@ -930,6 +1059,9 @@ async def external_crypto_monitor(app: Application, state: BotState) -> None:
                     action_reason=reason,
                     suggested_size_line=suggested_size_line,
                     also_watch=also_watch,
+                    funding_context=format_funding_context(funding),
+                    ls_context=format_ls_context(long_pct),
+                    btc_dominance=btc_dom,
                 )
                 await send_message_html(app, state, text)
         except Exception as exc:
