@@ -1974,7 +1974,7 @@ async def cmd_status_live(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     ]
 
     await update.message.reply_text(
-        escape_for_html("\n".join(lines)),
+        "<pre>" + escape_for_html("\n".join(lines)) + "</pre>",
         parse_mode="HTML",
         disable_web_page_preview=True,
     )
@@ -2378,10 +2378,35 @@ async def daily_open_setups_task(app: Application) -> None:
     """Fires at 8 AM and 8 PM SGT every day with a full AI-powered digest."""
     tz = timezone(timedelta(hours=8))
     digest_hours = [8, 20]  # 8 AM and 8 PM SGT
+    CATCHUP_MINS = 30  # send a missed digest if we're within this window after the scheduled time
 
     while True:
         now_sgt = now_utc().astimezone(tz)
-        # Find next digest time
+        ai_manager: Optional[AiManager] = app.bot_data.get("ai_manager")
+        state = app.bot_data.get("state")
+
+        # ── catch-up: if bot restarted and missed a digest within the last 30 min, send it now ──
+        if ai_manager:
+            for h in sorted(digest_hours):
+                candidate = now_sgt.replace(hour=h, minute=0, second=0, microsecond=0)
+                minutes_late = (now_sgt - candidate).total_seconds() / 60
+                if 0 < minutes_late <= CATCHUP_MINS:
+                    sent_key = f"digest_sent_{candidate.strftime('%Y-%m-%d_%H')}"
+                    if not ai_manager.memory.get(sent_key):
+                        log_err(f"catch-up digest firing for {candidate.strftime('%H:%M SGT')} ({minutes_late:.0f}m late)")
+                        try:
+                            digest_text = await _build_digest(app, state, is_morning=(h == 8))
+                            await app.bot.send_message(
+                                chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
+                                text=digest_text,
+                                parse_mode="HTML",
+                            )
+                            ai_manager.memory[sent_key] = True
+                            ai_manager.persist()
+                        except Exception as exc:
+                            log_err(f"catch-up digest send failed: {exc}")
+
+        # ── find the next scheduled digest time ──
         next_target = None
         for h in sorted(digest_hours):
             candidate = now_sgt.replace(hour=h, minute=0, second=0, microsecond=0)
@@ -2394,7 +2419,7 @@ async def daily_open_setups_task(app: Application) -> None:
 
         await asyncio.sleep(max(1, int((next_target - now_sgt).total_seconds())))
 
-        ai_manager: Optional[AiManager] = app.bot_data.get("ai_manager")
+        ai_manager = app.bot_data.get("ai_manager")
         state = app.bot_data.get("state")
         if not ai_manager:
             continue
