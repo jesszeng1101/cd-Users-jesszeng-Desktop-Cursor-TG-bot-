@@ -568,19 +568,29 @@ def choose_market_related_assets(asset_display: str) -> str:
 
 
 async def fetch_klines_15m(client: httpx.AsyncClient, symbol: str, limit: int) -> list[list[Any]]:
-    params = {"symbol": symbol, "interval": "15m", "limit": limit}
-    resp = await client.get("https://api.binance.com/api/v3/klines", params=params, timeout=25.0)
-    resp.raise_for_status()
-    data = resp.json()
-    return data if isinstance(data, list) else []
+    try:
+        params = {"symbol": symbol, "interval": "15m", "limit": limit}
+        resp = await client.get("https://api.binance.com/api/v3/klines", params=params, timeout=25.0)
+        resp.raise_for_status()
+        data = resp.json()
+        return data if isinstance(data, list) else []
+    except Exception as exc:
+        if "451" in str(exc) or "400" in str(exc):
+            return await fetch_bybit_klines(symbol, "15", limit)
+        raise
 
 
 async def fetch_klines_1h(client: httpx.AsyncClient, symbol: str, limit: int) -> list[list[Any]]:
-    params = {"symbol": symbol, "interval": "1h", "limit": limit}
-    resp = await client.get("https://api.binance.com/api/v3/klines", params=params, timeout=25.0)
-    resp.raise_for_status()
-    data = resp.json()
-    return data if isinstance(data, list) else []
+    try:
+        params = {"symbol": symbol, "interval": "1h", "limit": limit}
+        resp = await client.get("https://api.binance.com/api/v3/klines", params=params, timeout=25.0)
+        resp.raise_for_status()
+        data = resp.json()
+        return data if isinstance(data, list) else []
+    except Exception as exc:
+        if "451" in str(exc) or "400" in str(exc):
+            return await fetch_bybit_klines(symbol, "60", limit)
+        raise
 
 
 async def fetch_bybit_klines(symbol: str, interval: str, limit: int = 200) -> list[list[Any]]:

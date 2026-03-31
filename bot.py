@@ -337,11 +337,23 @@ async def news_monitor(app: Application, state: BotState, client: httpx.AsyncCli
 
 
 async def fetch_klines(client: httpx.AsyncClient, symbol: str, interval: str, limit: int) -> list[list[Any]]:
-    params = {"symbol": symbol, "interval": interval, "limit": limit}
-    data = await get_json(client, "https://api.binance.com/api/v3/klines", params=params)
-    if not isinstance(data, list):
-        return []
-    return data
+    """Fetch klines from Binance, falling back to Bybit if Binance is geo-blocked (HTTP 451)."""
+    try:
+        params = {"symbol": symbol, "interval": interval, "limit": limit}
+        data = await get_json(client, "https://api.binance.com/api/v3/klines", params=params)
+        if isinstance(data, list):
+            return data
+    except Exception as exc:
+        if "451" in str(exc) or "400" in str(exc):
+            # Binance geo-blocked or symbol not listed — fall back to Bybit
+            bybit_interval = interval.replace("m", "").replace("h", "0").replace("1h", "60").replace("15m", "15").replace("1d", "D")
+            # Normalize interval: Binance "1h"->Bybit "60", "15m"->"15", "1d"->"D"
+            _map = {"1m": "1", "3m": "3", "5m": "5", "15m": "15", "30m": "30",
+                    "1h": "60", "2h": "120", "4h": "240", "6h": "360", "12h": "720",
+                    "1d": "D", "1w": "W", "1M": "M"}
+            bybit_iv = _map.get(interval, "60")
+            return await fetch_bybit_klines(client, symbol, bybit_iv, limit)
+        raise
 
 
 async def preload_15m_volumes(state: BotState, client: httpx.AsyncClient) -> None:
@@ -1167,7 +1179,7 @@ async def fetch_live_crypto_24h(httpx_client: httpx.AsyncClient, symbols: list[s
     """
     Unified crypto ticker fetch:
     - MNTUSDT always via Bybit (never Binance)
-    - others via Binance first, Bybit fallback
+    - others via Binance first; if Binance is geo-blocked (HTTP 451) fall back to Bybit for all
     """
     unique = list(dict.fromkeys([s.upper() for s in symbols]))
     bybit_syms = [s for s in unique if s in BYBIT_ONLY_SYMBOLS]
@@ -1175,10 +1187,14 @@ async def fetch_live_crypto_24h(httpx_client: httpx.AsyncClient, symbols: list[s
 
     out: dict[str, dict[str, float]] = {}
     if binance_syms:
-        out.update(await fetch_live_binance_24h(httpx_client, binance_syms))
-        missing_binance = [s for s in binance_syms if s not in out]
-        if missing_binance:
-            out.update(await fetch_live_bybit_24h(missing_binance))
+        try:
+            out.update(await fetch_live_binance_24h(httpx_client, binance_syms))
+        except Exception as exc:
+            log_err(f"Binance 24h fetch failed ({exc}) — falling back to Bybit for all symbols")
+        # Fall back to Bybit for any symbols missing (covers both 451 and partial failures)
+        missing = [s for s in binance_syms if s not in out]
+        if missing:
+            out.update(await fetch_live_bybit_24h(missing))
     if bybit_syms:
         out.update(await fetch_live_bybit_24h(bybit_syms))
     return out
